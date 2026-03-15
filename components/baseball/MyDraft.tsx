@@ -4,13 +4,14 @@ import { useBaseballStore } from '@/store/useBaseballStore';
 import { computePuntAdjustedValues, totalDraftPool, totalRosterSpots, computeValueEfficiency, computeValueRanges } from '@/utils/auctionCalc';
 import { computeRankings, applyTeamBoost } from '@/utils/rankings';
 import { BASEBALL_POSITIONS, BASEBALL_CATEGORIES, BASEBALL_CATEGORY_LABELS, matchesPositionFilter, PITCHING_CATS, BATTING_CATS } from '@/utils/constants';
+import { fillRosterSlots } from '@/utils/rosterUtils';
 import StatTable from '@/components/shared/StatTable';
 import GlowCard from '@/components/shared/GlowCard';
 import ProgressBar from '@/components/shared/ProgressBar';
 import DataModeToggle from '@/components/shared/DataModeToggle';
 import PlayerTypeToggle from '@/components/shared/PlayerTypeToggle';
 import TeamRankingPanel from '@/components/shared/TeamRankingPanel';
-import type { RankedPlayer } from '@/types';
+import type { RankedPlayer, DraftPick } from '@/types';
 import type { BaseballCategory } from '@/types';
 
 const ROSTER_KEYS_BASE = ['C', '1B', '2B', '2B/SS', '1B/3B', '3B', 'SS', 'OF', 'UTIL', 'BN', 'IL'] as const;
@@ -35,10 +36,54 @@ function MarketScaleSlider({ label, value, onChange }: { label: string; value: n
 const BATTER_POS_DRAFT = new Set(['C', '1B', '2B', '3B', 'SS', 'OF', 'DH']);
 const PITCHER_POS_DRAFT = new Set(['SP', 'RP', 'P']);
 
-export default function MyDraft() {
+// Roster Template — shows all slots filled/empty
+function RosterTemplate({ picks, reserves, rosterSlots, positionOverrides, noPD }: {
+  picks: DraftPick[];
+  reserves: DraftPick[];
+  rosterSlots: Record<string, number>;
+  positionOverrides: Record<string, string>;
+  noPD: boolean;
+}) {
+  const slots = fillRosterSlots(picks, rosterSlots, positionOverrides, noPD);
+  return (
+    <div className="space-y-1">
+      {slots.map(({ slot, pick }, i) => (
+        <div key={slot + i} className={`flex items-center gap-2 px-2 py-1 rounded text-xs ${pick ? 'bg-[var(--navy-2)]' : 'border border-dashed border-[var(--border)]'}`}>
+          <span className={`font-mono w-10 shrink-0 text-[10px] ${pick ? 'accent-text' : 'text-[var(--text-dim)]'}`}>{slot}</span>
+          {pick ? (
+            <span className="text-[var(--text)] truncate">{pick.player.name}</span>
+          ) : (
+            <span className="text-[var(--text-dim)] italic">empty</span>
+          )}
+          {pick?.price !== undefined && pick.price > 0 && (
+            <span className="ml-auto font-mono text-[var(--gold)] text-[10px] shrink-0">${pick.price}</span>
+          )}
+        </div>
+      ))}
+      {reserves.length > 0 && (
+        <>
+          <div className="text-[10px] font-mono text-[var(--text-dim)] uppercase tracking-wider pt-2 pb-0.5 border-t border-[var(--border)]">
+            Reserves ({reserves.length}/15)
+          </div>
+          {reserves.map((r, i) => (
+            <div key={r.player.id + i} className="flex items-center gap-2 px-2 py-1 rounded text-xs bg-[var(--navy-2)] opacity-70">
+              <span className="font-mono w-10 shrink-0 text-[10px] text-[var(--text-dim)]">RES</span>
+              <span className="text-[var(--text)] truncate">{r.player.name}</span>
+              {r.price !== undefined && r.price > 0 && (
+                <span className="ml-auto font-mono text-[var(--gold)] text-[10px] shrink-0">${r.price}</span>
+              )}
+            </div>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
+export default function MyDraft({ onSaveToBank }: { onSaveToBank?: () => void } = {}) {
   const {
-    players, myTeam, draftPlayer, undoLastPick, resetDraft,
-    remainingBudget, leagueSettings, updateLeagueSettings,
+    players, myTeam, myTeamReserves, draftPlayer, draftPlayerAsReserve, undoLastPick, resetDraft,
+    leagueSettings, updateLeagueSettings,
     selectedCategories, categoryWeights,
     positionFilter, setPositionFilter,
     dataMode, setDataMode, pastPlayers, projectionPlayers,
@@ -61,20 +106,22 @@ export default function MyDraft() {
   const myTeamPlayers = myTeam.map((p) => p.player);
   const draftedIds = new Set(myTeamPlayers.map((p) => p.id));
 
-  const requiredSlots = useMemo(() => {
-    const slots = { ...leagueSettings.rosterSlots };
-    const total = Object.values(slots).reduce((a: number, b: number | unknown) => a + (b as number), 0);
-    return total - (leagueSettings.rosterSlots.IL ?? 0);
-  }, [leagueSettings.rosterSlots]);
-  const isDraftComplete = myTeam.length >= requiredSlots && requiredSlots > 0;
+  const totalRequired = useMemo(() => totalRosterSpots(leagueSettings), [leagueSettings]);
+  const rosterFull = myTeam.length >= totalRequired;
+  const allDraftedIds = useMemo(
+    () => new Set([...myTeamPlayers.map((p) => p.id), ...myTeamReserves.map((r) => r.player.id)]),
+    [myTeamPlayers, myTeamReserves]
+  );
+
+  const isDraftComplete = myTeam.length >= totalRequired && totalRequired > 0;
   const isSaved = savedDraft.length > 0 && savedDraft.every(p => myTeam.some(m => m.player.id === p.player.id));
   const poolSize = totalDraftPool(leagueSettings);
   const noPD = leagueSettings.noPitcherDesignation ?? false;
   const flaggedSet = useMemo(() => new Set(flaggedPlayerIds), [flaggedPlayerIds]);
 
   const availablePlayers = useMemo(
-    () => players.filter((p) => !draftedIds.has(p.id)),
-    [players, myTeam]
+    () => players.filter((p) => !allDraftedIds.has(p.id)),
+    [players, allDraftedIds]
   );
 
   const typeFilteredAvailablePlayers = useMemo(() => {
@@ -160,7 +207,11 @@ export default function MyDraft() {
 
   const handleDraft = (player: RankedPlayer) => {
     const price = leagueSettings.isAuction ? (playerPrices[player.id] ?? player.auctionValue ?? 1) : 0;
-    draftPlayer(player, price);
+    if (rosterFull) {
+      draftPlayerAsReserve(player, price);
+    } else {
+      draftPlayer(player, price);
+    }
     setPlayerPrices((prev) => { const n = { ...prev }; delete n[player.id]; return n; });
   };
 
@@ -189,8 +240,10 @@ export default function MyDraft() {
       // Draft button column between name and positions
       { key: '_draft', label: '', sortable: false, format: (_: unknown, p: RankedPlayer) => (
         <button onClick={(e) => { e.stopPropagation(); handleDraft(p); }}
-          className="px-2 py-1 rounded text-xs font-semibold accent-bg text-[var(--navy)] hover:opacity-90 whitespace-nowrap">
-          Draft
+          className={`px-2 py-1 rounded text-xs font-semibold hover:opacity-90 whitespace-nowrap ${
+            rosterFull ? 'bg-[var(--gold)] text-[var(--navy)]' : 'accent-bg text-[var(--navy)]'
+          }`}>
+          {rosterFull ? 'Reserve' : 'Draft'}
         </button>
       )},
       { key: 'positions', label: 'Pos', format: (_: unknown, p: RankedPlayer) =>
@@ -208,7 +261,7 @@ export default function MyDraft() {
           return (
             <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
               <span className="text-[var(--text-dim)] text-xs">$</span>
-              <input type="number" min={1} max={remainingBudget}
+              <input type="number" min={1} max={leagueSettings.budget}
                 value={playerPrices[p.id] ?? p.auctionValue ?? 1}
                 onChange={(e) => setPlayerPrices((prev) => ({ ...prev, [p.id]: parseInt(e.target.value) || 1 }))}
                 className="w-14 bg-[var(--navy-2)] border border-[var(--border)] rounded px-1.5 py-0.5 text-sm text-[var(--gold)] text-center outline-none focus:border-[var(--accent)]" />
@@ -238,7 +291,7 @@ export default function MyDraft() {
       },
     });
     return base;
-  }, [activeCats, leagueSettings.isAuction, playerPrices, remainingBudget, puntCategories, showRange, rangesMap]);
+  }, [activeCats, leagueSettings.isAuction, leagueSettings.budget, playerPrices, puntCategories, showRange, rangesMap, rosterFull]);
 
   if (players.length === 0) {
     return (
@@ -260,35 +313,19 @@ export default function MyDraft() {
             <div className="text-2xl font-display tracking-wider mt-1 accent-text">{myTeam.length}</div>
           </GlowCard>
           {leagueSettings.isAuction && (
-            <>
-              <GlowCard padding={false} hover={false} className="p-4">
-                <div className="text-xs font-mono text-[var(--text-dim)] uppercase tracking-wider">Budget Left</div>
-                <div className={`text-2xl font-display tracking-wider mt-1 ${remainingBudget < 20 ? 'text-[var(--danger)]' : 'accent-text'}`}>
-                  ${remainingBudget}
-                </div>
-              </GlowCard>
-              <GlowCard padding={false} hover={false} className="p-4">
-                <div className="text-xs font-mono text-[var(--text-dim)] uppercase tracking-wider">$/Player</div>
-                <div className="text-2xl font-display tracking-wider mt-1 text-[var(--gold)]">
-                  ${(leagueSettings.draftRounds - myTeam.length) > 0
-                    ? Math.round(remainingBudget / (leagueSettings.draftRounds - myTeam.length))
-                    : 0}
-                </div>
-              </GlowCard>
-              <GlowCard padding={false} hover={false} className="p-4">
-                <div className="text-xs font-mono text-[var(--text-dim)] uppercase tracking-wider">Base Budget</div>
-                {editingBudget ? (
-                  <input type="number" min={50} max={10000} autoFocus defaultValue={leagueSettings.budget}
-                    onBlur={(e) => { updateLeagueSettings({ budget: parseInt(e.target.value) || leagueSettings.budget }); setEditingBudget(false); }}
-                    onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); if (e.key === 'Escape') setEditingBudget(false); }}
-                    className="w-20 bg-[var(--navy-2)] border border-[var(--accent)] rounded px-2 py-0.5 text-sm text-[var(--gold)] outline-none font-mono mt-1" />
-                ) : (
-                  <button onClick={() => setEditingBudget(true)} className="text-2xl font-display tracking-wider mt-1 text-[var(--gold)] hover:underline cursor-text">
-                    ${leagueSettings.budget}<span className="text-[9px] text-[var(--text-dim)] ml-1">✎</span>
-                  </button>
-                )}
-              </GlowCard>
-            </>
+            <GlowCard padding={false} hover={false} className="p-4">
+              <div className="text-xs font-mono text-[var(--text-dim)] uppercase tracking-wider">Base Budget</div>
+              {editingBudget ? (
+                <input type="number" min={50} max={10000} autoFocus defaultValue={leagueSettings.budget}
+                  onBlur={(e) => { updateLeagueSettings({ budget: parseInt(e.target.value) || leagueSettings.budget }); setEditingBudget(false); }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); if (e.key === 'Escape') setEditingBudget(false); }}
+                  className="w-20 bg-[var(--navy-2)] border border-[var(--accent)] rounded px-2 py-0.5 text-sm text-[var(--gold)] outline-none font-mono mt-1" />
+              ) : (
+                <button onClick={() => setEditingBudget(true)} className="text-2xl font-display tracking-wider mt-1 text-[var(--gold)] hover:underline cursor-text">
+                  ${leagueSettings.budget}<span className="text-[9px] text-[var(--text-dim)] ml-1">✎</span>
+                </button>
+              )}
+            </GlowCard>
           )}
         </div>
         <div className="flex items-center gap-2 flex-wrap">
@@ -439,6 +476,13 @@ export default function MyDraft() {
               </div>
               <div className="flex gap-2 items-center">
                 <button onClick={undoLastPick} className="text-xs text-[var(--text-dim)] hover:text-[var(--text)] hover:underline">Undo</button>
+                {onSaveToBank && myTeam.length > 0 && (
+                  <button
+                    onClick={onSaveToBank}
+                    className="accent-bg text-[var(--navy)] text-xs px-3 py-1.5 rounded font-semibold hover:opacity-90">
+                    💾 Save to Bank
+                  </button>
+                )}
                 {isDraftComplete && (
                   <button
                     onClick={saveDraft}
@@ -448,18 +492,34 @@ export default function MyDraft() {
                 )}
               </div>
             </div>
+            {rosterFull && (
+              <div className={`text-[10px] font-mono px-2 py-1 rounded ${myTeamReserves.length >= 15 ? 'text-[var(--danger)] bg-[var(--danger)]/10' : 'text-[var(--gold)] bg-[var(--gold)]/10'}`}>
+                {myTeamReserves.length >= 15
+                  ? 'Reserves full (15/15)'
+                  : 'Roster full — drafting to reserves'}
+              </div>
+            )}
             {myTeam.length === 0 ? (
               <p className="text-sm text-[var(--text-dim)] text-center py-4">No players drafted yet.</p>
             ) : (
-              <div className="space-y-1.5 max-h-64 overflow-y-auto">
-                {myTeam.map(({ player, price: p }, i) => {
-                  return (
-                    <div key={player.id} className="flex items-center justify-between py-1.5 border-b border-[var(--border)] last:border-0 gap-2">
-                      <div className="min-w-0 flex-1">
-                        <span className="text-xs font-mono text-[var(--text-dim)] mr-2">{i + 1}.</span>
-                        <span className="text-sm text-[var(--text)]">{player.name}</span>
-                      </div>
-                      {/* Position override dropdown */}
+              <div className="max-h-96 overflow-y-auto">
+                <RosterTemplate
+                  picks={myTeam}
+                  reserves={myTeamReserves}
+                  rosterSlots={leagueSettings.rosterSlots as Record<string, number>}
+                  positionOverrides={positionOverrides}
+                  noPD={noPD}
+                />
+              </div>
+            )}
+            {/* Position override controls for drafted players */}
+            {myTeam.length > 0 && (
+              <details className="mt-1">
+                <summary className="text-[10px] font-mono text-[var(--text-dim)] cursor-pointer hover:text-[var(--text)]">Override positions</summary>
+                <div className="space-y-1.5 mt-2 max-h-48 overflow-y-auto">
+                  {myTeam.map(({ player }) => (
+                    <div key={player.id} className="flex items-center justify-between gap-2 py-0.5">
+                      <span className="text-xs text-[var(--text)] truncate">{player.name}</span>
                       <select
                         value={positionOverrides[player.id] ?? player.positions[0] ?? 'UTIL'}
                         onChange={(e) => setPositionOverride(player.id, e.target.value)}
@@ -470,13 +530,10 @@ export default function MyDraft() {
                         <option value="UTIL">UTIL</option>
                         <option value="BN">BN</option>
                       </select>
-                      {leagueSettings.isAuction && (
-                        <span className="text-sm font-mono text-[var(--gold)] shrink-0">${p}</span>
-                      )}
                     </div>
-                  );
-                })}
-              </div>
+                  ))}
+                </div>
+              </details>
             )}
           </GlowCard>
 
@@ -533,3 +590,6 @@ export default function MyDraft() {
     </div>
   );
 }
+
+// Suppress unused variable warnings for constants used only in JSX
+void PITCHER_KEY_NoPD;

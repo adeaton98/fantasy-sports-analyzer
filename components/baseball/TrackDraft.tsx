@@ -4,6 +4,7 @@ import { useBaseballStore } from '@/store/useBaseballStore';
 import { computeAuctionValues, totalDraftPool, totalRosterSpots, computeValueRanges } from '@/utils/auctionCalc';
 import { computeRankings, applyTeamBoost } from '@/utils/rankings';
 import { BASEBALL_POSITIONS, BASEBALL_CATEGORIES, BASEBALL_CATEGORY_LABELS, matchesPositionFilter, PITCHING_CATS, BATTING_CATS } from '@/utils/constants';
+import { slotEligible, fillRosterSlots } from '@/utils/rosterUtils';
 import GlowCard from '@/components/shared/GlowCard';
 import DataModeToggle from '@/components/shared/DataModeToggle';
 import PlayerTypeToggle from '@/components/shared/PlayerTypeToggle';
@@ -14,51 +15,9 @@ import type { BaseballCategory } from '@/types';
 const ROSTER_KEYS_BASE = ['C', '1B', '2B', '2B/SS', '1B/3B', '3B', 'SS', 'OF', 'UTIL', 'BN', 'IL'] as const;
 const PITCHER_KEYS = ['SP', 'RP'] as const;
 
-// ── Slot eligibility ───────────────────────────────────────────────────────────
-function slotEligible(positions: string[], slot: string): boolean {
-  if (slot === 'BN' || slot === 'IL') return true;
-  if (slot === 'UTIL') return positions.some((p) => !['SP', 'RP', 'P'].includes(p));
-  // P slot (no pitcher designation) matches any pitcher
-  if (slot === 'P') return positions.some((p) => ['SP', 'RP', 'P'].includes(p));
-  return matchesPositionFilter(positions, slot);
-}
-
-// ── Greedy roster slot fill ────────────────────────────────────────────────────
-function fillRosterSlots(
-  picks: DraftPick[],
-  rosterSlots: Record<string, number>,
-  positionOverrides: Record<string, string>,
-  noPD: boolean
-): { slot: string; pick: DraftPick | null }[] {
-  const SLOT_ORDER = ['C', '1B', '2B', '2B/SS', '1B/3B', '3B', 'SS', 'OF', 'UTIL',
-    ...(noPD ? ['P'] : ['SP', 'RP']), 'BN', 'IL'];
-
-  const allSlots: { slot: string; pick: DraftPick | null }[] = SLOT_ORDER.flatMap((key) => {
-    const count = rosterSlots[key] ?? 0;
-    return Array.from({ length: count }, () => ({ slot: key, pick: null as DraftPick | null }));
-  });
-
-  const remaining = [...picks];
-  for (const entry of allSlots) {
-    const idx = remaining.findIndex((dp) => {
-      const positions = positionOverrides[dp.player.id]
-        ? [positionOverrides[dp.player.id]]
-        : dp.player.positions;
-      return slotEligible(positions, entry.slot);
-    });
-    if (idx >= 0) {
-      entry.pick = remaining[idx];
-      remaining.splice(idx, 1);
-    }
-  }
-
-  // Append overflow (e.g., extra BN picks beyond BN slot count)
-  for (const dp of remaining) {
-    allSlots.push({ slot: 'BN+', pick: dp });
-  }
-
-  return allSlots;
-}
+// slotEligible and fillRosterSlots are imported from @/utils/rosterUtils
+// Suppress unused import linting — slotEligible is used indirectly via fillRosterSlots
+void slotEligible;
 
 // ── Setup Phase ────────────────────────────────────────────────────────────────
 interface SetupPhaseProps {

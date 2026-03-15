@@ -1,7 +1,7 @@
 'use client';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import type { Player, BaseballLeagueSettings, DraftPick, BaseballCategory, DataMode } from '@/types';
+import type { Player, BaseballLeagueSettings, DraftPick, BaseballCategory, DataMode, BankedTeam } from '@/types';
 import { DEFAULT_BASEBALL_SETTINGS, BASEBALL_CATEGORIES } from '@/utils/constants';
 import { mergePastAndProjections } from '@/utils/fileParser';
 
@@ -52,7 +52,10 @@ interface BaseballStore {
 
   // Draft — My Team
   myTeam: DraftPick[];
+  myTeamReserves: DraftPick[];
   draftPlayer: (player: Player, price: number) => void;
+  draftPlayerAsReserve: (player: Player, price: number) => void;
+  removeReserve: (playerId: string) => void;
   undoLastPick: () => void;
   resetDraft: () => void;
   remainingBudget: number;
@@ -92,6 +95,14 @@ interface BaseballStore {
   setTeamRankWeight: (v: number) => void;
   teamRankEnabled: boolean;
   setTeamRankEnabled: (v: boolean) => void;
+
+  // Banked teams
+  bankedTeams: BankedTeam[];
+  saveTeamToBank: (name: string) => void;
+  deleteBankedTeam: (id: string) => void;
+  updateBankedTeam: (id: string, picks: DraftPick[]) => void;
+  updateBankedTeamReserves: (id: string, picks: DraftPick[], reserves: DraftPick[]) => void;
+  renameBankedTeam: (id: string, name: string) => void;
 }
 
 const defaultWeights = Object.fromEntries(
@@ -199,24 +210,32 @@ export const useBaseballStore = create<BaseballStore>()(
       saveAllTeams: () => set((s) => ({ savedAllTeams: { ...s.allTeams } })),
 
       myTeam: [],
+      myTeamReserves: [],
       remainingBudget: DEFAULT_BASEBALL_SETTINGS.budget,
       draftPlayer: (player, price) =>
         set((s) => ({
           myTeam: [...s.myTeam, { player, price }],
-          remainingBudget: s.remainingBudget - price,
+          // budget NOT depleted — it's used only as a valuation input
+        })),
+      draftPlayerAsReserve: (player, price) =>
+        set((s) => ({
+          myTeamReserves: s.myTeamReserves.length < 15
+            ? [...s.myTeamReserves, { player, price }]
+            : s.myTeamReserves,
+        })),
+      removeReserve: (playerId) =>
+        set((s) => ({
+          myTeamReserves: s.myTeamReserves.filter((p) => p.player.id !== playerId),
         })),
       undoLastPick: () =>
         set((s) => {
           if (s.myTeam.length === 0) return s;
-          const last = s.myTeam[s.myTeam.length - 1];
-          return {
-            myTeam: s.myTeam.slice(0, -1),
-            remainingBudget: s.remainingBudget + (last.price ?? 0),
-          };
+          return { myTeam: s.myTeam.slice(0, -1) };
         }),
       resetDraft: () =>
         set((s) => ({
           myTeam: [],
+          myTeamReserves: [],
           remainingBudget: s.leagueSettings.budget,
           allTeams: {},
         })),
@@ -286,9 +305,38 @@ export const useBaseballStore = create<BaseballStore>()(
       setTeamRankWeight: (v) => set({ teamRankWeight: v }),
       teamRankEnabled: false,
       setTeamRankEnabled: (v) => set({ teamRankEnabled: v }),
+
+      bankedTeams: [],
+      saveTeamToBank: (name) =>
+        set((s) => ({
+          bankedTeams: [
+            ...s.bankedTeams,
+            {
+              id: `bank_${Date.now()}`,
+              name,
+              picks: [...s.myTeam],
+              reserves: [...s.myTeamReserves],
+              savedAt: Date.now(),
+            },
+          ],
+        })),
+      deleteBankedTeam: (id) =>
+        set((s) => ({ bankedTeams: s.bankedTeams.filter((t) => t.id !== id) })),
+      updateBankedTeam: (id, picks) =>
+        set((s) => ({
+          bankedTeams: s.bankedTeams.map((t) => t.id === id ? { ...t, picks } : t),
+        })),
+      updateBankedTeamReserves: (id, picks, reserves) =>
+        set((s) => ({
+          bankedTeams: s.bankedTeams.map((t) => t.id === id ? { ...t, picks, reserves } : t),
+        })),
+      renameBankedTeam: (id, name) =>
+        set((s) => ({
+          bankedTeams: s.bankedTeams.map((t) => t.id === id ? { ...t, name } : t),
+        })),
     }),
     {
-      name: 'baseball-store-v6',
+      name: 'baseball-store-v8',
       partialize: (s) => ({
         players: s.players,
         pastPlayers: s.pastPlayers,
@@ -301,6 +349,7 @@ export const useBaseballStore = create<BaseballStore>()(
         deflationScale: s.deflationScale,
         puntCategories: s.puntCategories,
         myTeam: s.myTeam,
+        myTeamReserves: s.myTeamReserves,
         remainingBudget: s.remainingBudget,
         savedDraft: s.savedDraft,
         savedAllTeams: s.savedAllTeams,
@@ -314,6 +363,7 @@ export const useBaseballStore = create<BaseballStore>()(
         teamRankings: s.teamRankings,
         teamRankWeight: s.teamRankWeight,
         teamRankEnabled: s.teamRankEnabled,
+        bankedTeams: s.bankedTeams,
       }),
     }
   )

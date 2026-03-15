@@ -18,6 +18,7 @@ export default function Nav() {
         { href: '/baseball/auction', label: 'Auction Values', icon: '$' },
         { href: '/baseball/draft', label: 'Draft Mode', icon: '◎' },
         { href: '/baseball/watchlist', label: 'Watchlist', icon: '★' },
+        { href: '/baseball/team-bank', label: 'Team Bank', icon: '💾' },
         { href: '/baseball/league', label: 'My League', icon: '🏆' },
       ]
     : [

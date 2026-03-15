@@ -61,6 +61,15 @@ export interface DraftPick {
   teamName?: string;
 }
 
+// ── Banked team (saved draft snapshot) ───────────────
+export interface BankedTeam {
+  id: string;
+  name: string;
+  picks: DraftPick[];
+  reserves: DraftPick[]; // up to 15; NOT counted in category coverage
+  savedAt: number; // timestamp
+}
+
 // ── Column mapping ────────────────────────────────────
 export type ColumnMap = Record<string, string>; // raw header → canonical stat key
 
