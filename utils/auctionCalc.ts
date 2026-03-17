@@ -1,6 +1,27 @@
 import type { Player, RankedPlayer } from '@/types';
 import type { BaseballLeagueSettings } from '@/types';
 import { computeRankings } from './rankings';
+import { BATTING_CATS, PITCHING_CATS } from './constants';
+
+// ── Batter/Pitcher skew — adjusts category weights before ranking ──────────────
+// skew: -1 = full pitcher bias, 0 = neutral, +1 = full batter bias
+// At ±1: favored side gets ×1.5, opposing side gets ×0.5 (3:1 ratio max)
+export function applyBatterPitcherSkew(
+  weights: Record<string, number>,
+  skew: number
+): Record<string, number> {
+  if (skew === 0) return weights;
+  const result = { ...weights };
+  const batterMult = Math.max(0.1, 1 + skew * 0.5);
+  const pitcherMult = Math.max(0.1, 1 - skew * 0.5);
+  for (const cat of BATTING_CATS) {
+    if (cat in result) result[cat] = (result[cat] ?? 1) * batterMult;
+  }
+  for (const cat of PITCHING_CATS) {
+    if (cat in result) result[cat] = (result[cat] ?? 1) * pitcherMult;
+  }
+  return result;
+}
 
 // ── Total draftable roster spots ──────────────────────────────────────────────
 export function totalRosterSpots(settings: BaseballLeagueSettings): number {

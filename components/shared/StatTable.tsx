@@ -22,11 +22,13 @@ interface StatTableProps {
   rowHighlight?: (player: RankedPlayer) => 'yellow' | 'red' | undefined;
   flaggedIds?: Set<string>;
   onFlag?: (player: RankedPlayer) => void;
+  avoidedIds?: Set<string>;
+  onAvoid?: (player: RankedPlayer) => void;
 }
 
 export default function StatTable({
   players, columns, draftedIds, onDraft, showRank = true, maxHeight = '600px', onRowClick,
-  rowHighlight, flaggedIds, onFlag,
+  rowHighlight, flaggedIds, onFlag, avoidedIds, onAvoid,
 }: StatTableProps) {
   const [sortKey, setSortKey] = useState<string>('rank');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
@@ -77,7 +79,7 @@ export default function StatTable({
                   # {sortIndicator('rank')}
                 </th>
               )}
-              {onFlag && <th style={{ width: '30px' }} />}
+              {(onFlag || onAvoid) && <th style={{ width: onFlag && onAvoid ? '52px' : '30px' }} />}
               {columns.map((col) => (
                 <th
                   key={col.key}
@@ -93,11 +95,12 @@ export default function StatTable({
           <tbody>
             {sorted.map((player) => {
               const drafted = draftedIds?.has(player.id);
+              const avoided = avoidedIds?.has(player.id);
               const highlight = rowHighlight?.(player);
               return (
                 <tr
                   key={player.id}
-                  className={`${drafted ? 'drafted' : ''} ${highlight === 'yellow' ? 'bg-yellow-900/20' : highlight === 'red' ? 'bg-red-900/20' : ''}`}
+                  className={`${drafted ? 'drafted' : ''} ${avoided ? 'opacity-40' : ''} ${highlight === 'yellow' ? 'bg-yellow-900/20' : highlight === 'red' ? 'bg-red-900/20' : ''}`}
                   onClick={() => onRowClick?.(player)}
                   style={{ cursor: onRowClick ? 'pointer' : undefined }}
                 >
@@ -106,15 +109,28 @@ export default function StatTable({
                       <RankBadge rank={player.rank} size="sm" />
                     </td>
                   )}
-                  {onFlag && (
+                  {(onFlag || onAvoid) && (
                     <td>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); onFlag(player); }}
-                        className={`text-sm ${flaggedIds?.has(player.id) ? 'text-yellow-400' : 'text-[var(--text-dim)] hover:text-yellow-400'}`}
-                        title={flaggedIds?.has(player.id) ? 'Remove from watchlist' : 'Add to watchlist'}
-                      >
-                        {flaggedIds?.has(player.id) ? '★' : '☆'}
-                      </button>
+                      <div className="flex items-center gap-0.5">
+                        {onFlag && (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); onFlag(player); }}
+                            className={`text-sm leading-none ${flaggedIds?.has(player.id) ? 'text-yellow-400' : 'text-[var(--text-dim)] hover:text-yellow-400'}`}
+                            title={flaggedIds?.has(player.id) ? 'Remove from watchlist' : 'Add to watchlist'}
+                          >
+                            {flaggedIds?.has(player.id) ? '★' : '☆'}
+                          </button>
+                        )}
+                        {onAvoid && (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); onAvoid(player); }}
+                            className={`text-sm leading-none font-bold ${avoidedIds?.has(player.id) ? 'text-red-400' : 'text-[var(--text-dim)] hover:text-red-400'}`}
+                            title={avoidedIds?.has(player.id) ? 'Remove from avoid list' : 'Add to avoid list'}
+                          >
+                            {avoidedIds?.has(player.id) ? '−' : '−'}
+                          </button>
+                        )}
+                      </div>
                     </td>
                   )}
                   {columns.map((col) => {
@@ -149,7 +165,7 @@ export default function StatTable({
             })}
             {sorted.length === 0 && (
               <tr>
-                <td colSpan={columns.length + (showRank ? 1 : 0) + (onDraft ? 1 : 0) + (onFlag ? 1 : 0)}
+                <td colSpan={columns.length + (showRank ? 1 : 0) + (onDraft ? 1 : 0) + (onFlag || onAvoid ? 1 : 0)}
                   className="text-center text-[var(--text-dim)] py-12">
                   No players found.
                 </td>

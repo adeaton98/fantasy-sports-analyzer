@@ -70,6 +70,28 @@ export interface BankedTeam {
   savedAt: number; // timestamp
 }
 
+// ── League History ────────────────────────────────────────────────────────────
+export interface CategoryHistoryRow {
+  team: string;
+  stats: Partial<Record<BaseballCategory | 'RBI', number>>;
+}
+
+export interface YearCategoryHistory {
+  year: number;
+  rows: CategoryHistoryRow[];
+}
+
+export interface HistoricalDraftPick {
+  playerName: string;
+  teamName: string;
+  price: number;
+}
+
+export interface YearDraftRecap {
+  year: number;
+  picks: HistoricalDraftPick[];
+}
+
 // ── Column mapping ────────────────────────────────────
 export type ColumnMap = Record<string, string>; // raw header → canonical stat key
 

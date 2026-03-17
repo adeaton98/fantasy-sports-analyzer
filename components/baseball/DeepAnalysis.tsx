@@ -10,129 +10,38 @@ import StatTable from '@/components/shared/StatTable';
 import GlowCard from '@/components/shared/GlowCard';
 import DataModeToggle from '@/components/shared/DataModeToggle';
 import PlayerTypeToggle from '@/components/shared/PlayerTypeToggle';
-import TeamRankingPanel from '@/components/shared/TeamRankingPanel';
 import type { RankedPlayer } from '@/types';
 import type { BaseballCategory } from '@/types';
-
-// ── Correlation suggestion engine ─────────────────────────────────────────────
-function computeSuggestions(
-  weights: Record<BaseballCategory, number>,
-  baseWeights: Record<BaseballCategory, number>
-): { cat: BaseballCategory; suggestion: string; reason: string; direction: 'up' | 'down' }[] {
-  const suggestions: { cat: BaseballCategory; suggestion: string; reason: string; direction: 'up' | 'down'; score: number }[] = [];
-  const seen = new Set<BaseballCategory>();
-
-  for (const cat of BASEBALL_CATEGORIES) {
-    const currentW = weights[cat] ?? 1;
-    const baseW = baseWeights[cat] ?? 1;
-    const delta = currentW - baseW; // positive = user increased, negative = user decreased
-
-    if (Math.abs(delta) < 0.2) continue; // ignore small changes
-
-    const corrs = BASEBALL_CATEGORY_CORRELATIONS[cat] ?? [];
-    for (const { cat: corrCat, strength } of corrs) {
-      if (seen.has(corrCat)) continue;
-
-      const corrCurrentW = weights[corrCat] ?? 1;
-      const corrBaseW = baseWeights[corrCat] ?? 1;
-      const corrDelta = corrCurrentW - corrBaseW;
-
-      // If user lowered cat X and corr cat hasn't been adjusted similarly, suggest lowering corr cat
-      if (strength > 0 && delta < -0.2 && corrDelta > -0.15) {
-        suggestions.push({
-          cat: corrCat,
-          suggestion: `Lower ${corrCat}`,
-          reason: `${cat} and ${corrCat} tend to come from the same hitter archetype (${(strength * 100).toFixed(0)}% correlation). Devaluing ${cat} usually means you also care less about ${corrCat}.`,
-          direction: 'down',
-          score: Math.abs(delta) * strength,
-        });
-        seen.add(corrCat);
-      }
-      // If user raised cat X and corr cat hasn't been raised, suggest raising corr cat
-      if (strength > 0 && delta > 0.2 && corrDelta < 0.15) {
-        suggestions.push({
-          cat: corrCat,
-          suggestion: `Raise ${corrCat}`,
-          reason: `${cat} and ${corrCat} frequently come from the same players (${(strength * 100).toFixed(0)}% correlation). If you want more ${cat}, you likely want more ${corrCat} too.`,
-          direction: 'up',
-          score: Math.abs(delta) * strength,
-        });
-        seen.add(corrCat);
-      }
-      // Negative correlation: if user raised SV, consider lowering W
-      if (strength < 0 && delta > 0.2 && corrDelta > -0.1) {
-        suggestions.push({
-          cat: corrCat,
-          suggestion: `Consider lowering ${corrCat}`,
-          reason: `${cat} and ${corrCat} often trade off — closers get saves but rarely wins, starters get wins but rarely saves. Targeting ${cat} means less roster space for ${corrCat} contributors.`,
-          direction: 'down',
-          score: Math.abs(delta) * Math.abs(strength),
-        });
-        seen.add(corrCat);
-      }
-    }
-  }
-
-  return suggestions.sort((a, b) => b.score - a.score).slice(0, 5);
-}
-
-// ── Weight slider ─────────────────────────────────────────────────────────────
-function WeightSlider({ cat, label, value, base, onChange }: {
-  cat: BaseballCategory; label: string; value: number; base: number; onChange: (v: number) => void;
-}) {
-  const delta = value - base;
-  const changed = Math.abs(delta) >= 0.2;
-  return (
-    <div className="space-y-1.5">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-mono font-medium text-[var(--text)]">{cat}</span>
-          <span className="text-xs text-[var(--text-dim)]">{label}</span>
-          {changed && (
-            <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${delta > 0 ? 'bg-[var(--neon)] bg-opacity-20 text-[var(--neon)]' : 'bg-[var(--danger)] bg-opacity-20 text-[var(--danger)]'}`}>
-              {delta > 0 ? '+' : ''}{delta.toFixed(1)}
-            </span>
-          )}
-        </div>
-        <span className="text-sm font-mono accent-text">{value.toFixed(1)}x</span>
-      </div>
-      <input type="range" min={0} max={3} step={0.1} value={value}
-        onChange={(e) => onChange(parseFloat(e.target.value))}
-        className="w-full h-1.5 rounded-full appearance-none cursor-pointer"
-        style={{ accentColor: 'var(--accent)' }} />
-    </div>
-  );
-}
 
 const BATTER_POS_DEEP = new Set(['C', '1B', '2B', '3B', 'SS', 'OF', 'DH']);
 const PITCHER_POS_DEEP = new Set(['SP', 'RP', 'P']);
 
-// ── Main component ────────────────────────────────────────────────────────────
 export default function BaseballDeepAnalysis() {
   const {
     players, positionFilter, setPositionFilter,
     dataMode, setDataMode, pastPlayers, projectionPlayers,
-    categoryWeights: storedWeights,
+    selectedCategories, toggleCategory,
+    categoryWeights,
     playerTypeFilter, setPlayerTypeFilter,
     teamRankings, teamRankWeight, teamRankEnabled,
+    flaggedPlayerIds, flagPlayer, unflagPlayer,
+    avoidedPlayerIds, avoidPlayer, unavoidPlayer,
   } = useBaseballStore();
 
-  // Local weights for deep analysis — start from stored weights but can be adjusted independently
-  const [localWeights, setLocalWeights] = useState<Record<BaseballCategory, number>>(
-    () => Object.fromEntries(BASEBALL_CATEGORIES.map((c) => [c, storedWeights[c] ?? 1])) as Record<BaseballCategory, number>
-  );
   const [search, setSearch] = useState('');
 
-  const baseWeights = useMemo(
-    () => Object.fromEntries(BASEBALL_CATEGORIES.map((c) => [c, 1])) as Record<BaseballCategory, number>,
-    []
-  );
+  const flaggedSet = useMemo(() => new Set(flaggedPlayerIds), [flaggedPlayerIds]);
+  const avoidedSet = useMemo(() => new Set(avoidedPlayerIds), [avoidedPlayerIds]);
 
-  const setWeight = (cat: BaseballCategory, v: number) =>
-    setLocalWeights((prev) => ({ ...prev, [cat]: v }));
+  const handleFlag = (player: RankedPlayer) => {
+    if (flaggedSet.has(player.id)) unflagPlayer(player.id);
+    else flagPlayer(player.id);
+  };
 
-  const resetLocalWeights = () =>
-    setLocalWeights(Object.fromEntries(BASEBALL_CATEGORIES.map((c) => [c, 1])) as Record<BaseballCategory, number>);
+  const handleAvoid = (player: RankedPlayer) => {
+    if (avoidedSet.has(player.id)) unavoidPlayer(player.id);
+    else avoidPlayer(player.id);
+  };
 
   const typeFilteredPlayers = useMemo(() => {
     if (playerTypeFilter === 'pitchers') return players.filter(p => p.positions.some(pos => PITCHER_POS_DEEP.has(pos)));
@@ -140,18 +49,21 @@ export default function BaseballDeepAnalysis() {
     return players;
   }, [players, playerTypeFilter]);
 
-  const activeCatsDeep = useMemo(() => {
-    if (playerTypeFilter === 'pitchers') return BASEBALL_CATEGORIES.filter(c => PITCHING_CATS.includes(c));
-    if (playerTypeFilter === 'batters') return BASEBALL_CATEGORIES.filter(c => BATTING_CATS.includes(c));
-    return BASEBALL_CATEGORIES;
-  }, [playerTypeFilter]);
+  const activeCats = useMemo(() => {
+    const typeCats = playerTypeFilter === 'pitchers'
+      ? selectedCategories.filter(c => PITCHING_CATS.includes(c as BaseballCategory))
+      : playerTypeFilter === 'batters'
+      ? selectedCategories.filter(c => BATTING_CATS.includes(c as BaseballCategory))
+      : selectedCategories;
+    return typeCats;
+  }, [selectedCategories, playerTypeFilter]);
 
   const ranked = useMemo(() => {
     if (typeFilteredPlayers.length === 0) return [];
-    const baseRanked = computeRankings(typeFilteredPlayers, activeCatsDeep, localWeights, 'baseball');
+    const baseRanked = computeRankings(typeFilteredPlayers, activeCats, categoryWeights, 'baseball');
     if (!teamRankEnabled || teamRankings.length === 0 || teamRankWeight <= 1) return baseRanked;
     return applyTeamBoost(baseRanked, teamRankings, teamRankWeight);
-  }, [typeFilteredPlayers, activeCatsDeep, localWeights, teamRankEnabled, teamRankings, teamRankWeight]);
+  }, [typeFilteredPlayers, activeCats, categoryWeights, teamRankEnabled, teamRankings, teamRankWeight]);
 
   const filtered = useMemo(() => {
     let list = ranked;
@@ -164,8 +76,6 @@ export default function BaseballDeepAnalysis() {
     }
     return list;
   }, [ranked, positionFilter, search]);
-
-  const suggestions = useMemo(() => computeSuggestions(localWeights, baseWeights), [localWeights, baseWeights]);
 
   const columns = useMemo(() => [
     { key: 'name', label: 'Player', format: (_: unknown, p: RankedPlayer) =>
@@ -218,53 +128,44 @@ export default function BaseballDeepAnalysis() {
         <div>
           <h1 className="font-display text-5xl tracking-widest text-[var(--text)]">DEEP ANALYSIS</h1>
           <p className="text-[var(--text-dim)] text-sm mt-1">
-            Adjust category weights — the app suggests correlated categories to consider.
+            Rank by selected categories. Adjust weights and team boost in Settings.
           </p>
         </div>
         <DataModeToggle mode={dataMode} onChange={setDataMode} pastCount={pastPlayers.length} projCount={projectionPlayers.length} />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-        {/* Left: weight sliders */}
+        {/* Left: category toggles + correlations */}
         <div className="space-y-4">
-          <GlowCard className="space-y-5" hover={false}>
+          {/* Category toggles */}
+          <GlowCard className="space-y-4" hover={false}>
             <div className="flex items-center justify-between">
-              <h2 className="text-xs font-mono uppercase tracking-wider text-[var(--text-dim)]">Category Weights</h2>
-              <button onClick={resetLocalWeights} className="text-xs text-[var(--text-dim)] hover:accent-text hover:underline">Reset</button>
+              <h2 className="text-xs font-mono uppercase tracking-wider text-[var(--text-dim)]">Categories</h2>
+              <a href="/baseball/settings" className="text-xs text-[var(--text-dim)] hover:accent-text hover:underline">
+                Weights in Settings →
+              </a>
             </div>
-            {BASEBALL_CATEGORIES.map((cat) => (
-              <WeightSlider key={cat} cat={cat} label={BASEBALL_CATEGORY_LABELS[cat]}
-                value={localWeights[cat] ?? 1} base={baseWeights[cat] ?? 1}
-                onChange={(v) => setWeight(cat, v)} />
-            ))}
+            <div className="flex flex-wrap gap-2">
+              {BASEBALL_CATEGORIES.map((cat) => {
+                const active = selectedCategories.includes(cat);
+                return (
+                  <button
+                    key={cat}
+                    onClick={() => toggleCategory(cat)}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-mono font-medium border transition-all ${
+                      active
+                        ? 'accent-bg text-[var(--navy)] border-transparent'
+                        : 'border-[var(--border)] text-[var(--text-dim)] hover:text-[var(--text)] hover:border-[var(--accent)]'
+                    }`}
+                  >
+                    {active && <span>✓</span>}
+                    {cat}
+                    <span className="text-[9px] opacity-60">{BASEBALL_CATEGORY_LABELS[cat as BaseballCategory]}</span>
+                  </button>
+                );
+              })}
+            </div>
           </GlowCard>
-
-          {/* Suggestions panel */}
-          {suggestions.length > 0 && (
-            <GlowCard className="space-y-4" hover={false}>
-              <div>
-                <h2 className="text-xs font-mono uppercase tracking-wider text-[var(--text-dim)]">💡 Suggestions</h2>
-                <p className="text-[10px] text-[var(--text-dim)] mt-1">Based on your weight changes and stat correlations.</p>
-              </div>
-              {suggestions.map(({ cat, suggestion, reason, direction }) => (
-                <div key={cat} className={`p-3 rounded-lg border ${direction === 'up'
-                  ? 'border-[var(--neon)] border-opacity-30 bg-[var(--neon)] bg-opacity-5'
-                  : 'border-[var(--danger)] border-opacity-30 bg-[var(--danger)] bg-opacity-5'}`}>
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className={`text-xs font-mono font-semibold ${direction === 'up' ? 'text-[var(--neon)]' : 'text-[var(--danger)]'}`}>
-                      {direction === 'up' ? '↑' : '↓'} {suggestion}
-                    </span>
-                    <button
-                      onClick={() => setWeight(cat, direction === 'up' ? Math.min(3, (localWeights[cat] ?? 1) + 0.5) : Math.max(0, (localWeights[cat] ?? 1) - 0.5))}
-                      className="text-[9px] px-2 py-0.5 rounded accent-dim-bg accent-text border border-[var(--accent)] border-opacity-30 hover:opacity-90">
-                      Apply
-                    </button>
-                  </div>
-                  <p className="text-[10px] text-[var(--text-dim)] leading-relaxed">{reason}</p>
-                </div>
-              ))}
-            </GlowCard>
-          )}
 
           {/* Correlation map */}
           <GlowCard className="space-y-3" hover={false}>
@@ -302,12 +203,21 @@ export default function BaseballDeepAnalysis() {
               {BASEBALL_POSITIONS.map((p) => <option key={p} value={p}>{p}</option>)}
             </select>
             <PlayerTypeToggle value={playerTypeFilter} onChange={setPlayerTypeFilter} />
-            <TeamRankingPanel />
           </div>
           <p className="text-xs text-[var(--text-dim)]">
-            {filtered.length} players · Rankings use local weights only — does not affect other pages.
+            {filtered.length} players · Category weights set in{' '}
+            <a href="/baseball/settings" className="accent-text hover:underline">Settings</a>.
           </p>
-          <StatTable players={filtered} columns={columns} showRank maxHeight="640px" />
+          <StatTable
+            players={filtered}
+            columns={columns}
+            showRank
+            maxHeight="640px"
+            flaggedIds={flaggedSet}
+            onFlag={handleFlag}
+            avoidedIds={avoidedSet}
+            onAvoid={handleAvoid}
+          />
         </div>
       </div>
     </div>

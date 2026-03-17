@@ -45,6 +45,10 @@ interface BaseballStore {
   setInflationScale: (v: number) => void;
   setDeflationScale: (v: number) => void;
 
+  // Batter/pitcher skew (-1 = pitcher, 0 = neutral, +1 = batter)
+  batterPitcherSkew: number;
+  setBatterPitcherSkew: (v: number) => void;
+
   // Punt categories (draft mode)
   puntCategories: BaseballCategory[];
   togglePuntCategory: (cat: BaseballCategory) => void;
@@ -83,6 +87,12 @@ interface BaseballStore {
   flagPlayer: (id: string) => void;
   unflagPlayer: (id: string) => void;
   clearFlags: () => void;
+
+  // Avoid list
+  avoidedPlayerIds: string[];
+  avoidPlayer: (id: string) => void;
+  unavoidPlayer: (id: string) => void;
+  clearAvoided: () => void;
 
   // Player type filter
   playerTypeFilter: 'all' | 'pitchers' | 'batters';
@@ -195,6 +205,9 @@ export const useBaseballStore = create<BaseballStore>()(
       setInflationScale: (v) => set({ inflationScale: v }),
       setDeflationScale: (v) => set({ deflationScale: v }),
 
+      batterPitcherSkew: 0,
+      setBatterPitcherSkew: (v) => set({ batterPitcherSkew: v }),
+
       puntCategories: [],
       togglePuntCategory: (cat) =>
         set((s) => ({
@@ -297,6 +310,17 @@ export const useBaseballStore = create<BaseballStore>()(
       })),
       clearFlags: () => set({ flaggedPlayerIds: [] }),
 
+      avoidedPlayerIds: [],
+      avoidPlayer: (id) => set((s) => ({
+        avoidedPlayerIds: s.avoidedPlayerIds.includes(id)
+          ? s.avoidedPlayerIds
+          : [...s.avoidedPlayerIds, id],
+      })),
+      unavoidPlayer: (id) => set((s) => ({
+        avoidedPlayerIds: s.avoidedPlayerIds.filter((x) => x !== id),
+      })),
+      clearAvoided: () => set({ avoidedPlayerIds: [] }),
+
       playerTypeFilter: 'all',
       setPlayerTypeFilter: (f) => set({ playerTypeFilter: f }),
       teamRankings: [],
@@ -347,6 +371,7 @@ export const useBaseballStore = create<BaseballStore>()(
         categoryWeights: s.categoryWeights,
         inflationScale: s.inflationScale,
         deflationScale: s.deflationScale,
+        batterPitcherSkew: s.batterPitcherSkew,
         puntCategories: s.puntCategories,
         myTeam: s.myTeam,
         myTeamReserves: s.myTeamReserves,
@@ -359,6 +384,7 @@ export const useBaseballStore = create<BaseballStore>()(
         playerValueOverrides: s.playerValueOverrides,
         positionOverrides: s.positionOverrides,
         flaggedPlayerIds: s.flaggedPlayerIds,
+        avoidedPlayerIds: s.avoidedPlayerIds,
         playerTypeFilter: s.playerTypeFilter,
         teamRankings: s.teamRankings,
         teamRankWeight: s.teamRankWeight,

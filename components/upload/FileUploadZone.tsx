@@ -7,6 +7,7 @@ import { useBasketballStore } from '@/store/useBasketballStore';
 import { useSportStore } from '@/store/useSportStore';
 import type { Player } from '@/types';
 import ColumnMapper from './ColumnMapper';
+import LeagueHistoryUploadSection from '@/components/baseball/LeagueHistoryUploadSection';
 
 interface ParsedSource {
   filename: string;
@@ -269,6 +270,9 @@ export default function FileUploadZone() {
           </a>
         </div>
       )}
+
+      {/* League History — baseball only */}
+      {activeSport === 'baseball' && <LeagueHistoryUploadSection />}
 
       {/* Instructions */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">

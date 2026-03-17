@@ -183,18 +183,68 @@ function SetupPhase({ onStart, defaultRosterSlots, defaultNoPD }: SetupPhaseProp
 }
 
 // ── Team Category Sidebar ──────────────────────────────────────────────────────
-function TeamSidebar({ teamName, picks, allPlayers, categories, rosterSlots, noPD, positionOverrides, onClose }: {
+function TeamSidebar({ teamName, picks, categories, rosterSlots, noPD, positionOverrides,
+  allTeams, teamNames, teamCatStats, correlations, onClose }: {
   teamName: string;
   picks: DraftPick[];
-  allPlayers: { stats: Record<string, number> }[];
   categories: string[];
   rosterSlots: Record<string, number>;
   noPD: boolean;
   positionOverrides: Record<string, string>;
+  allTeams: Record<string, DraftPick[]>;
+  teamNames: string[];
+  teamCatStats: Record<string, Record<string, number | null>>;
+  correlations: Map<string, number>;
   onClose: () => void;
 }) {
-  const [tab, setTab] = useState<'roster' | 'coverage'>('roster');
+  const [tab, setTab] = useState<'roster' | 'coverage' | 'strategy'>('roster');
   const filledSlots = useMemo(() => fillRosterSlots(picks, rosterSlots, positionOverrides, noPD), [picks, rosterSlots, positionOverrides, noPD]);
+
+  // Per-category: does this team beat field avg? (cross-team comparison)
+  const catComparison = useMemo(() => {
+    const otherNames = teamNames.filter((n) => n !== teamName);
+    return categories.map((cat) => {
+      const isNeg = ['ERA', 'WHIP'].includes(cat);
+      const myAvg = teamCatStats[teamName]?.[cat] ?? null;
+      const otherAvgs = otherNames
+        .map((n) => teamCatStats[n]?.[cat])
+        .filter((v): v is number => v != null);
+      const fieldAvg = otherAvgs.length > 0 ? otherAvgs.reduce((a, b) => a + b, 0) / otherAvgs.length : null;
+      // Count how many other teams this team beats (head-to-head)
+      const winsAgainst = otherAvgs.filter((v) => isNeg ? (myAvg != null && myAvg < v) : (myAvg != null && myAvg > v)).length;
+      const winRate = otherAvgs.length > 0 ? winsAgainst / otherAvgs.length : null;
+      const winning = winRate != null && winRate > 0.5;
+      // pct vs field avg for progress bar
+      const pct = myAvg != null && fieldAvg != null && fieldAvg > 0
+        ? isNeg ? Math.min(200, (fieldAvg / myAvg) * 100) : Math.min(200, (myAvg / fieldAvg) * 100)
+        : 0;
+      return { cat, myAvg, fieldAvg, winning, pct, winsAgainst, totalOthers: otherAvgs.length, isNeg };
+    });
+  }, [categories, teamName, teamNames, teamCatStats]);
+
+  // Draft strategy: target categories to reach 60% wins
+  const draftStrategy = useMemo(() => {
+    if (catComparison.length === 0 || picks.length === 0) return null;
+    const numCats = catComparison.length;
+    const targetWins = Math.ceil(numCats * 0.6);
+    const winning = catComparison.filter((c) => c.winning);
+    const losing = catComparison.filter((c) => !c.winning);
+    const winsNeeded = Math.max(0, targetWins - winning.length);
+    const suggestions = losing
+      .slice()
+      .sort((a, b) => b.pct - a.pct)
+      .slice(0, Math.max(winsNeeded, 2))
+      .map((s) => {
+        const corrs = categories
+          .filter((c) => c !== s.cat)
+          .map((c) => ({ cat: c, r: correlations.get(`${s.cat}::${c}`) ?? 0 }))
+          .filter((c) => Math.abs(c.r) > 0.3)
+          .sort((a, b) => Math.abs(b.r) - Math.abs(a.r))
+          .slice(0, 3);
+        return { ...s, corrs };
+      });
+    return { targetWins, numCats, winning, losing, winsNeeded, suggestions };
+  }, [catComparison, picks.length, categories, correlations]);
 
   return (
     <div className="fixed inset-y-0 right-0 z-50 w-96 bg-[var(--card)] border-l border-[var(--border)] shadow-2xl flex flex-col">
@@ -208,7 +258,7 @@ function TeamSidebar({ teamName, picks, allPlayers, categories, rosterSlots, noP
 
       {/* Tabs */}
       <div className="flex border-b border-[var(--border)]">
-        {(['roster', 'coverage'] as const).map((t) => (
+        {(['roster', 'coverage', 'strategy'] as const).map((t) => (
           <button key={t} onClick={() => setTab(t)}
             className={`flex-1 py-2 text-xs font-mono uppercase tracking-wider transition-colors ${
               tab === t ? 'accent-text border-b-2 border-[var(--accent)]' : 'text-[var(--text-dim)] hover:text-[var(--text)]'
@@ -250,27 +300,23 @@ function TeamSidebar({ teamName, picks, allPlayers, categories, rosterSlots, noP
           picks.length === 0 ? (
             <p className="text-sm text-[var(--text-dim)] text-center py-8">No players drafted yet.</p>
           ) : (
-            categories.map((cat) => {
-              const teamPlayers = picks.map((p) => p.player);
-              const myVals = teamPlayers.map((p) => p.stats[cat] ?? 0).filter((v) => v > 0);
-              const myAvg = myVals.length > 0 ? myVals.reduce((a, b) => a + b, 0) / myVals.length : 0;
-              const allVals = allPlayers.map((p) => p.stats[cat] ?? 0).filter((v) => v > 0);
-              const allAvg = allVals.length > 0 ? allVals.reduce((a, b) => a + b, 0) / allVals.length : 1;
-              const isNeg = ['ERA', 'WHIP'].includes(cat);
-              const pct = isNeg
-                ? (myAvg > 0 ? Math.min(200, (allAvg / myAvg) * 100) : 0)
-                : (allAvg > 0 ? Math.min(200, (myAvg / allAvg) * 100) : 0);
-              const winning = pct >= 100;
-              return (
+            <div className="space-y-2">
+              <p className="text-[10px] text-[var(--text-dim)] font-mono">
+                Per-player avg vs field avg · {picks.length} picks
+              </p>
+              {catComparison.map(({ cat, myAvg, fieldAvg, winning, pct, winsAgainst, totalOthers, isNeg }) => (
                 <div key={cat} className="space-y-1 py-1">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-mono text-[var(--text-dim)]">{cat}</span>
                     <div className="flex items-center gap-2">
-                      <span className="text-xs font-mono text-[var(--text)]">
-                        {myAvg > 0 ? (['ERA', 'WHIP', 'OBP'].includes(cat) ? myAvg.toFixed(3) : myAvg.toFixed(0)) : '—'}
+                      <span className="text-[10px] font-mono text-[var(--text-dim)]">
+                        {fieldAvg != null ? (['ERA','WHIP','OBP'].includes(cat) ? fieldAvg.toFixed(3) : fieldAvg.toFixed(1)) : '—'} avg
                       </span>
-                      <span className={`text-xs ${winning ? 'text-[var(--neon)]' : 'text-[var(--danger)]'}`}>
-                        {winning ? '↑' : '↓'}
+                      <span className="text-xs font-mono text-[var(--text)]">
+                        {myAvg != null ? (['ERA','WHIP','OBP'].includes(cat) ? myAvg.toFixed(3) : myAvg.toFixed(1)) : '—'}
+                      </span>
+                      <span className={`text-[10px] font-mono ${winning ? 'text-[var(--neon)]' : 'text-[var(--danger)]'}`}>
+                        {totalOthers > 0 ? `${winsAgainst}/${totalOthers}` : '—'}
                       </span>
                     </div>
                   </div>
@@ -278,12 +324,219 @@ function TeamSidebar({ teamName, picks, allPlayers, categories, rosterSlots, noP
                     <div className={`h-1.5 rounded-full transition-all ${winning ? 'bg-[var(--neon)]' : 'bg-[var(--danger)]'}`}
                       style={{ width: `${Math.min(100, pct / 2)}%` }} />
                   </div>
+                  {isNeg && myAvg != null && fieldAvg != null && (
+                    <div className="text-[9px] text-[var(--text-dim)] text-right">lower is better</div>
+                  )}
                 </div>
-              );
-            })
+              ))}
+            </div>
+          )
+        )}
+
+        {tab === 'strategy' && (
+          picks.length === 0 ? (
+            <p className="text-sm text-[var(--text-dim)] text-center py-8">Draft some players first.</p>
+          ) : draftStrategy == null ? (
+            <p className="text-sm text-[var(--text-dim)] text-center py-8">No category data yet.</p>
+          ) : (
+            <div className="space-y-4">
+              {/* Win chips */}
+              <div>
+                <p className="text-[10px] font-mono text-[var(--text-dim)] uppercase tracking-wider mb-2">
+                  Category wins vs field
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {catComparison.map(({ cat, winning, pct }) => (
+                    <span key={cat} className={`px-2 py-0.5 rounded text-[10px] font-mono border ${
+                      winning
+                        ? 'bg-[var(--accent)]/15 text-[var(--accent)] border-[var(--accent)]/40'
+                        : pct >= 80
+                        ? 'bg-[var(--gold)]/15 text-[var(--gold)] border-[var(--gold)]/30'
+                        : 'bg-[var(--danger)]/10 text-[var(--danger)] border-[var(--danger)]/25'
+                    }`}>
+                      {cat} {winning ? '✓' : `${pct.toFixed(0)}%`}
+                    </span>
+                  ))}
+                </div>
+              </div>
+
+              {/* Win count summary */}
+              <div className="text-xs">
+                {draftStrategy.winning.length >= draftStrategy.targetWins ? (
+                  <span className="accent-text">
+                    Winning {draftStrategy.winning.length}/{draftStrategy.numCats} — target met
+                  </span>
+                ) : (
+                  <span className="text-[var(--text-dim)]">
+                    Winning <span className="text-[var(--text)]">{draftStrategy.winning.length}/{draftStrategy.numCats}</span>
+                    {' '}— <span className="text-[var(--gold)]">{draftStrategy.winsNeeded} more needed</span>
+                    {' '}to reach {draftStrategy.targetWins}
+                  </span>
+                )}
+              </div>
+
+              {/* Target suggestions */}
+              {draftStrategy.winsNeeded > 0 && draftStrategy.suggestions.length > 0 && (
+                <div className="space-y-2">
+                  <p className="text-[10px] font-mono text-[var(--text-dim)] uppercase tracking-wider">Draft for:</p>
+                  {draftStrategy.suggestions.map((s) => (
+                    <div key={s.cat} className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] font-mono accent-text w-10 shrink-0">{s.cat}</span>
+                        <div className="flex-1 bg-[var(--navy-2)] rounded-full h-1">
+                          <div className="h-1 rounded-full bg-[var(--gold)]" style={{ width: `${Math.min(s.pct, 100)}%` }} />
+                        </div>
+                        <span className="text-[9px] font-mono text-[var(--gold)] w-8 text-right">{s.pct.toFixed(0)}%</span>
+                      </div>
+                      {s.corrs.length > 0 && (
+                        <div className="flex flex-wrap gap-1 pl-12">
+                          {s.corrs.map((c) => (
+                            <span key={c.cat} className={`text-[9px] font-mono px-1.5 py-0.5 rounded border ${
+                              c.r > 0 ? 'border-[var(--accent)]/25 text-[var(--text-dim)]' : 'border-[var(--danger)]/25 text-[var(--danger)]'
+                            }`}>
+                              {c.r > 0 ? '↑' : '↓'} {c.cat}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Correlation matrix */}
+              {correlations.size > 0 && (
+                <details>
+                  <summary className="text-[10px] font-mono text-[var(--text-dim)] cursor-pointer hover:text-[var(--text)] select-none">
+                    Stat Correlations
+                  </summary>
+                  <div className="mt-2 overflow-x-auto">
+                    <table className="text-[8px] font-mono border-collapse w-full">
+                      <thead>
+                        <tr>
+                          <th className="p-0.5 w-8"></th>
+                          {categories.map((c) => (
+                            <th key={c} className="p-0.5 text-center text-[var(--text-dim)] font-normal">{c}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {categories.map((cat1) => (
+                          <tr key={cat1}>
+                            <td className="p-0.5 text-right text-[var(--text-dim)] font-semibold pr-1">{cat1}</td>
+                            {categories.map((cat2) => {
+                              if (cat1 === cat2) return <td key={cat2} className="p-0.5 text-center text-[var(--text-dim)] bg-[var(--navy-2)]">—</td>;
+                              const r = correlations.get(`${cat1}::${cat2}`) ?? 0;
+                              const absR = Math.abs(r);
+                              const color = absR < 0.3 ? 'text-[var(--text-dim)]' : r > 0 ? 'text-[var(--accent)]' : 'text-[var(--danger)]';
+                              const bg = absR < 0.3 ? '' : r > 0 ? 'bg-[var(--accent)]/10' : 'bg-[var(--danger)]/10';
+                              return (
+                                <td key={cat2} className={`p-0.5 text-center ${color} ${bg}`}>
+                                  {r.toFixed(2)}
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </details>
+              )}
+            </div>
           )
         )}
       </div>
+    </div>
+  );
+}
+
+// ── Category Comparison Table ──────────────────────────────────────────────────
+function CategoryComparisonTable({ teamNames, allTeams, teamCatStats, selectedCategories }: {
+  teamNames: string[];
+  allTeams: Record<string, DraftPick[]>;
+  teamCatStats: Record<string, Record<string, number | null>>;
+  selectedCategories: string[];
+}) {
+  if (teamNames.length === 0 || selectedCategories.length === 0) return null;
+  const anyPicks = teamNames.some((n) => (allTeams[n]?.length ?? 0) > 0);
+  if (!anyPicks) return (
+    <div className="py-8 text-center text-sm text-[var(--text-dim)]">No picks yet — comparison will appear as teams draft.</div>
+  );
+
+  const NEG_CATS = new Set(['ERA', 'WHIP']);
+  const RATE_CATS = new Set(['ERA', 'WHIP', 'OBP']);
+
+  // For each category, rank teams (1=best)
+  const catRanks = useMemo(() => {
+    const result: Record<string, Record<string, number>> = {};
+    for (const cat of selectedCategories) {
+      const isNeg = NEG_CATS.has(cat);
+      const entries = teamNames
+        .map((n) => ({ name: n, val: teamCatStats[n]?.[cat] ?? null }))
+        .filter((e): e is { name: string; val: number } => e.val != null);
+      entries.sort((a, b) => isNeg ? a.val - b.val : b.val - a.val);
+      result[cat] = {};
+      entries.forEach((e, i) => { result[cat][e.name] = i + 1; });
+    }
+    return result;
+  }, [teamNames, teamCatStats, selectedCategories]);
+
+  const maxRank = teamNames.length;
+
+  return (
+    <div className="overflow-x-auto">
+      <table className="text-xs font-mono border-collapse w-full min-w-max">
+        <thead>
+          <tr className="border-b border-[var(--border)]">
+            <th className="text-left py-2 pr-3 text-[var(--text-dim)] font-normal uppercase tracking-wider text-[10px] sticky left-0 bg-[var(--card)] z-10 w-14">Cat</th>
+            {teamNames.map((name) => (
+              <th key={name} className="text-center py-2 px-2 text-[var(--text-dim)] font-normal min-w-[80px]">
+                <div className="truncate max-w-[80px]" title={name}>{name}</div>
+                <div className="text-[9px] text-[var(--text-dim)]">{allTeams[name]?.length ?? 0} picks</div>
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {selectedCategories.map((cat) => {
+            const isNeg = NEG_CATS.has(cat);
+            const ranks = catRanks[cat] ?? {};
+            return (
+              <tr key={cat} className="border-b border-[var(--border)]/40">
+                <td className="py-1.5 pr-3 text-[var(--text-dim)] sticky left-0 bg-[var(--card)] z-10">
+                  <span className="font-semibold">{cat}</span>
+                  {isNeg && <span className="text-[8px] text-[var(--text-dim)] ml-1">↓</span>}
+                </td>
+                {teamNames.map((name) => {
+                  const val = teamCatStats[name]?.[cat];
+                  const rank = ranks[name];
+                  const numRanked = Object.keys(ranks).length;
+                  const isFirst = rank === 1;
+                  const isLast = rank === numRanked && numRanked > 1;
+                  const isMid = !isFirst && !isLast;
+                  const hasPicks = (allTeams[name]?.length ?? 0) > 0;
+                  return (
+                    <td key={name} className={`py-1.5 px-2 text-center rounded-sm ${
+                      !hasPicks || val == null ? 'text-[var(--text-dim)]'
+                      : isFirst ? 'text-[var(--accent)] bg-[var(--accent)]/10 font-semibold'
+                      : isLast ? 'text-[var(--danger)] bg-[var(--danger)]/8'
+                      : isMid && rank <= Math.ceil(maxRank / 2) ? 'text-[var(--gold)]'
+                      : 'text-[var(--text-dim)]'
+                    }`}>
+                      {val == null ? '—' : RATE_CATS.has(cat) ? val.toFixed(3) : val.toFixed(1)}
+                      {rank != null && numRanked > 1 && val != null && (
+                        <span className="text-[8px] opacity-50 ml-0.5">#{rank}</span>
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <p className="text-[9px] text-[var(--text-dim)] mt-2">Per-player averages · teams with fewer picks shown fairly</p>
     </div>
   );
 }
@@ -304,6 +557,7 @@ export default function TrackDraft() {
     positionOverrides, setPositionOverride,
     dataMode, setDataMode, pastPlayers, projectionPlayers,
     flaggedPlayerIds, flagPlayer, unflagPlayer,
+    avoidedPlayerIds, avoidPlayer, unavoidPlayer,
     savedAllTeams, saveAllTeams, resetDraft,
     playerTypeFilter, setPlayerTypeFilter,
     teamRankings, teamRankWeight, teamRankEnabled,
@@ -324,9 +578,11 @@ export default function TrackDraft() {
   const [sidebarTeam, setSidebarTeam] = useState<string | null>(null);
   const [showMarketScales, setShowMarketScales] = useState(false);
   const [showRange, setShowRange] = useState(false);
+  const [rightTab, setRightTab] = useState<'teams' | 'compare'>('teams');
 
   const noPD = leagueSettings.noPitcherDesignation ?? false;
   const flaggedSet = useMemo(() => new Set(flaggedPlayerIds), [flaggedPlayerIds]);
+  const avoidedSet = useMemo(() => new Set(avoidedPlayerIds), [avoidedPlayerIds]);
 
   const requiredPerTeam = useMemo(() => {
     const total = Object.values(leagueSettings.rosterSlots).reduce((a: number, b: number | unknown) => a + (b as number), 0);
@@ -371,6 +627,51 @@ export default function TrackDraft() {
     if (!showRange) return new Map<string, { low: number; high: number }>();
     return computeValueRanges(ranked);
   }, [ranked, showRange]);
+
+  // Pearson correlation between category pairs across player pool
+  const correlations = useMemo(() => {
+    if (players.length < 5 || selectedCategories.length < 2) return new Map<string, number>();
+    const result = new Map<string, number>();
+    for (let i = 0; i < selectedCategories.length; i++) {
+      for (let j = i + 1; j < selectedCategories.length; j++) {
+        const cat1 = selectedCategories[i];
+        const cat2 = selectedCategories[j];
+        const pairs = players
+          .filter((p) => p.stats[cat1] != null && p.stats[cat2] != null)
+          .map((p) => [p.stats[cat1]!, p.stats[cat2]!] as [number, number]);
+        if (pairs.length < 5) continue;
+        const xs = pairs.map((p) => p[0]);
+        const ys = pairs.map((p) => p[1]);
+        const xMean = xs.reduce((a, b) => a + b, 0) / xs.length;
+        const yMean = ys.reduce((a, b) => a + b, 0) / ys.length;
+        const num = xs.reduce((s, x, k) => s + (x - xMean) * (ys[k] - yMean), 0);
+        const xStd = Math.sqrt(xs.reduce((s, x) => s + (x - xMean) ** 2, 0));
+        const yStd = Math.sqrt(ys.reduce((s, y) => s + (y - yMean) ** 2, 0));
+        if (xStd === 0 || yStd === 0) continue;
+        const r = num / (xStd * yStd);
+        result.set(`${cat1}::${cat2}`, r);
+        result.set(`${cat2}::${cat1}`, r);
+      }
+    }
+    return result;
+  }, [players, selectedCategories]);
+
+  // Per-player averages per team per category (handles unequal pick counts)
+  const teamCatStats = useMemo(() => {
+    const result: Record<string, Record<string, number | null>> = {};
+    for (const name of teamNames) {
+      const picks = allTeams[name] ?? [];
+      result[name] = {};
+      for (const cat of selectedCategories) {
+        const isNeg = ['ERA', 'WHIP'].includes(cat);
+        const vals = picks
+          .map((p) => p.player.stats[cat])
+          .filter((v): v is number => v != null && !isNaN(v) && (isNeg ? v > 0 : v >= 0));
+        result[name][cat] = vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+      }
+    }
+    return result;
+  }, [allTeams, teamNames, selectedCategories]);
 
   const filtered = useMemo(() => {
     let list = ranked;
@@ -417,6 +718,14 @@ export default function TrackDraft() {
       unflagPlayer(player.id);
     } else {
       flagPlayer(player.id);
+    }
+  };
+
+  const handleAvoid = (player: RankedPlayer) => {
+    if (avoidedSet.has(player.id)) {
+      unavoidPlayer(player.id);
+    } else {
+      avoidPlayer(player.id);
     }
   };
 
@@ -581,7 +890,7 @@ export default function TrackDraft() {
                     const suggestedVal = playerValueOverrides[player.id] ?? player.auctionValue ?? 1;
                     const isAssigning = assigningPlayerId === player.id;
                     return (
-                      <tr key={player.id}>
+                      <tr key={player.id} className={avoidedSet.has(player.id) ? 'opacity-40' : ''}>
                         <td><span className="text-xs font-mono text-[var(--text-dim)]">{player.rank}</span></td>
                         <td>
                           <div className="min-w-0">
@@ -613,13 +922,22 @@ export default function TrackDraft() {
                           )}
                         </td>
                         <td>
-                          <button
-                            onClick={() => handleFlag(player)}
-                            className={`text-sm ${flaggedSet.has(player.id) ? 'text-yellow-400' : 'text-[var(--text-dim)] hover:text-yellow-400'}`}
-                            title={flaggedSet.has(player.id) ? 'Remove from watchlist' : 'Add to watchlist'}
-                          >
-                            {flaggedSet.has(player.id) ? '★' : '☆'}
-                          </button>
+                          <div className="flex items-center gap-0.5">
+                            <button
+                              onClick={() => handleFlag(player)}
+                              className={`text-sm leading-none ${flaggedSet.has(player.id) ? 'text-yellow-400' : 'text-[var(--text-dim)] hover:text-yellow-400'}`}
+                              title={flaggedSet.has(player.id) ? 'Remove from watchlist' : 'Add to watchlist'}
+                            >
+                              {flaggedSet.has(player.id) ? '★' : '☆'}
+                            </button>
+                            <button
+                              onClick={() => handleAvoid(player)}
+                              className={`text-sm leading-none font-bold ${avoidedSet.has(player.id) ? 'text-red-400' : 'text-[var(--text-dim)] hover:text-red-400'}`}
+                              title={avoidedSet.has(player.id) ? 'Remove from avoid list' : 'Add to avoid list'}
+                            >
+                              −
+                            </button>
+                          </div>
                         </td>
                         {leagueSettings.isAuction && (
                           <td>
@@ -678,8 +996,32 @@ export default function TrackDraft() {
           </div>
         </div>
 
-        {/* ── Team Rosters ── */}
-        <div className="xl:col-span-2 space-y-3 max-h-[640px] overflow-y-auto">
+        {/* ── Team Rosters / Compare ── */}
+        <div className="xl:col-span-2 space-y-3">
+          {/* Tab switcher */}
+          <div className="flex border-b border-[var(--border)]">
+            {(['teams', 'compare'] as const).map((t) => (
+              <button key={t} onClick={() => setRightTab(t)}
+                className={`px-4 py-2 text-xs font-mono uppercase tracking-wider transition-colors ${
+                  rightTab === t ? 'accent-text border-b-2 border-[var(--accent)]' : 'text-[var(--text-dim)] hover:text-[var(--text)]'
+                }`}>
+                {t === 'teams' ? 'Teams' : 'Category Compare'}
+              </button>
+            ))}
+          </div>
+
+          {rightTab === 'compare' && (
+            <GlowCard hover={false}>
+              <CategoryComparisonTable
+                teamNames={teamNames}
+                allTeams={allTeams as Record<string, DraftPick[]>}
+                teamCatStats={teamCatStats}
+                selectedCategories={selectedCategories}
+              />
+            </GlowCard>
+          )}
+
+          {rightTab === 'teams' && <div className="space-y-3 max-h-[580px] overflow-y-auto">
           {teamNames.map((name) => {
             const picks = allTeams[name] ?? [];
             const { total, spent, remaining } = teamBudget(name);
@@ -755,6 +1097,7 @@ export default function TrackDraft() {
               </GlowCard>
             );
           })}
+          </div>}
         </div>
       </div>
 
@@ -765,11 +1108,14 @@ export default function TrackDraft() {
           <TeamSidebar
             teamName={sidebarTeam}
             picks={(allTeams[sidebarTeam] ?? []) as DraftPick[]}
-            allPlayers={players}
-            categories={BASEBALL_CATEGORIES}
+            categories={selectedCategories}
             rosterSlots={leagueSettings.rosterSlots as Record<string, number>}
             noPD={noPD}
             positionOverrides={positionOverrides}
+            allTeams={allTeams as Record<string, DraftPick[]>}
+            teamNames={teamNames}
+            teamCatStats={teamCatStats}
+            correlations={correlations}
             onClose={() => setSidebarTeam(null)}
           />
         </>

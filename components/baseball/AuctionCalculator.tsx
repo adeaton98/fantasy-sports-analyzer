@@ -1,73 +1,49 @@
 'use client';
 import { useMemo, useState } from 'react';
 import { useBaseballStore } from '@/store/useBaseballStore';
-import { computeAuctionValues, totalDraftPool, computeValueEfficiency, computeValueRanges } from '@/utils/auctionCalc';
+import { useLeagueHistoryStore } from '@/store/useLeagueHistoryStore';
+import { computeAuctionValues, totalDraftPool, computeValueEfficiency, computeValueRanges, applyBatterPitcherSkew } from '@/utils/auctionCalc';
 import { applyTeamBoost } from '@/utils/rankings';
-import { BASEBALL_CATEGORIES, BASEBALL_CATEGORY_LABELS, BASEBALL_POSITIONS, matchesPositionFilter, PITCHING_CATS, BATTING_CATS } from '@/utils/constants';
-import CategorySlider from '@/components/shared/CategorySlider';
+import { BASEBALL_POSITIONS, matchesPositionFilter, PITCHING_CATS, BATTING_CATS } from '@/utils/constants';
+import { computeAvgDraftPrices, lookupHistPrice } from '@/utils/leagueHistoryParser';
 import StatTable from '@/components/shared/StatTable';
-import GlowCard from '@/components/shared/GlowCard';
 import DataModeToggle from '@/components/shared/DataModeToggle';
 import PlayerTypeToggle from '@/components/shared/PlayerTypeToggle';
-import TeamRankingPanel from '@/components/shared/TeamRankingPanel';
 import type { RankedPlayer } from '@/types';
 import type { BaseballCategory } from '@/types';
-
-const ROSTER_KEYS_BASE = ['C', '1B', '2B', '2B/SS', '1B/3B', '3B', 'SS', 'OF', 'UTIL', 'BN', 'IL'] as const;
-const PITCHER_KEYS = ['SP', 'RP'] as const;
-
-function MarketScaleSlider({ label, desc, value, onChange }: {
-  label: string; desc: string; value: number; onChange: (v: number) => void;
-}) {
-  return (
-    <div className="space-y-1.5">
-      <div className="flex items-center justify-between">
-        <div>
-          <div className="text-xs font-semibold text-[var(--text)]">{label}</div>
-          <div className="text-[10px] text-[var(--text-dim)]">{desc}</div>
-        </div>
-        <span className="text-sm font-mono accent-text">{value.toFixed(1)}x</span>
-      </div>
-      <input
-        type="range" min={1} max={3} step={0.1}
-        value={value}
-        onChange={(e) => onChange(parseFloat(e.target.value))}
-        className="w-full h-1.5 rounded-full appearance-none cursor-pointer"
-        style={{ accentColor: 'var(--accent)' }}
-      />
-      <div className="flex justify-between text-[9px] text-[var(--text-dim)] font-mono">
-        <span>1x (neutral)</span><span>2x</span><span>3x</span>
-      </div>
-    </div>
-  );
-}
 
 const BATTER_POS_AUCTION = new Set(['C', '1B', '2B', '3B', 'SS', 'OF', 'DH']);
 const PITCHER_POS_AUCTION = new Set(['SP', 'RP', 'P']);
 
 export default function AuctionCalculator() {
   const {
-    players, selectedCategories, leagueSettings, updateLeagueSettings,
-    categoryWeights, setCategoryWeight, resetWeights,
+    players, selectedCategories, leagueSettings,
+    categoryWeights,
     positionFilter, setPositionFilter,
     dataMode, setDataMode, pastPlayers, projectionPlayers,
-    inflationScale, deflationScale, setInflationScale, setDeflationScale,
+    inflationScale, deflationScale,
+    batterPitcherSkew,
     flaggedPlayerIds, flagPlayer, unflagPlayer,
+    avoidedPlayerIds, avoidPlayer, unavoidPlayer,
     clearPlayers,
     playerTypeFilter, setPlayerTypeFilter,
     teamRankings, teamRankWeight, teamRankEnabled,
   } = useBaseballStore();
 
+  const { draftRecaps } = useLeagueHistoryStore();
+
   const [search, setSearch] = useState('');
-  const [editingBudget, setEditingBudget] = useState(false);
-  const [editingTeams, setEditingTeams] = useState(false);
-  const [showRoster, setShowRoster] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [showRange, setShowRange] = useState(false);
+  const [lockedValues, setLockedValues] = useState<Map<string, number>>(new Map());
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState('');
+  const [activeTab, setActiveTab] = useState<'all' | 'by-position'>('all');
+  const [posTabPos, setPosTabPos] = useState('C');
 
-  const noPD = leagueSettings.noPitcherDesignation ?? false;
   const poolSize = totalDraftPool(leagueSettings);
   const flaggedSet = useMemo(() => new Set(flaggedPlayerIds), [flaggedPlayerIds]);
+  const avoidedSet = useMemo(() => new Set(avoidedPlayerIds), [avoidedPlayerIds]);
 
   const typeFilteredPlayers = useMemo(() => {
     if (playerTypeFilter === 'pitchers') return players.filter(p => p.positions.some(pos => PITCHER_POS_AUCTION.has(pos)));
@@ -84,25 +60,45 @@ export default function AuctionCalculator() {
     return typeCats;
   }, [selectedCategories, playerTypeFilter]);
 
+  // Base computed values (unmodified)
   const valued = useMemo(() => {
     if (typeFilteredPlayers.length === 0 || !leagueSettings.isAuction) return [];
-    const auctionValued = computeAuctionValues(typeFilteredPlayers, activeCats, categoryWeights, leagueSettings, inflationScale, deflationScale);
+    const skewedWeights = applyBatterPitcherSkew(categoryWeights, batterPitcherSkew);
+    const auctionValued = computeAuctionValues(typeFilteredPlayers, activeCats, skewedWeights, leagueSettings, inflationScale, deflationScale);
     if (!teamRankEnabled || teamRankings.length === 0 || teamRankWeight <= 1) return auctionValued;
     return applyTeamBoost(auctionValued, teamRankings, teamRankWeight);
-  }, [typeFilteredPlayers, activeCats, categoryWeights, leagueSettings, inflationScale, deflationScale, teamRankEnabled, teamRankings, teamRankWeight]);
+  }, [typeFilteredPlayers, activeCats, categoryWeights, batterPitcherSkew, leagueSettings, inflationScale, deflationScale, teamRankEnabled, teamRankings, teamRankWeight]);
+
+  // Locked + redistributed values
+  const adjustedValued = useMemo(() => {
+    if (lockedValues.size === 0) return valued;
+    const baseTotal = valued.reduce((s, p) => s + (p.auctionValue ?? 1), 0);
+    const lockedSum = [...lockedValues.values()].reduce((s, v) => s + v, 0);
+    const unlockedPlayers = valued.filter(p => !lockedValues.has(p.id));
+    const unlockedBaseSum = unlockedPlayers.reduce((s, p) => s + (p.auctionValue ?? 1), 0);
+    // Ensure unlocked players get at least $1 each
+    const remainingForUnlocked = Math.max(unlockedPlayers.length, baseTotal - lockedSum);
+    const scaleFactor = unlockedBaseSum > 0 ? remainingForUnlocked / unlockedBaseSum : 1;
+    return valued.map(p => ({
+      ...p,
+      auctionValue: lockedValues.has(p.id)
+        ? lockedValues.get(p.id)!
+        : Math.max(1, Math.round((p.auctionValue ?? 1) * scaleFactor)),
+    }));
+  }, [valued, lockedValues]);
 
   const efficiencyMap = useMemo(() => {
     if (!showSuggestions) return new Map<string, 'under' | 'over' | 'fair'>();
-    return computeValueEfficiency(valued);
-  }, [valued, showSuggestions]);
+    return computeValueEfficiency(adjustedValued);
+  }, [adjustedValued, showSuggestions]);
 
   const rangesMap = useMemo(() => {
     if (!showRange) return new Map<string, { low: number; high: number }>();
-    return computeValueRanges(valued);
-  }, [valued, showRange]);
+    return computeValueRanges(adjustedValued);
+  }, [adjustedValued, showRange]);
 
   const filtered = useMemo(() => {
-    let list = valued;
+    let list = adjustedValued;
     if (positionFilter !== 'ALL') {
       list = list.filter((p) => matchesPositionFilter(p.positions, positionFilter));
     }
@@ -111,17 +107,63 @@ export default function AuctionCalculator() {
       list = list.filter((p) => p.name.toLowerCase().includes(q));
     }
     return list;
-  }, [valued, positionFilter, search]);
+  }, [adjustedValued, positionFilter, search]);
 
   const totalMoney = leagueSettings.numTeams * leagueSettings.budget;
-  const assignedMoney = valued.reduce((s, p) => s + (p.auctionValue ?? 0), 0);
+  const assignedMoney = adjustedValued.reduce((s, p) => s + (p.auctionValue ?? 0), 0);
+
+  const avgPriceMap = useMemo(() => computeAvgDraftPrices(draftRecaps), [draftRecaps]);
+
+  const histPriceById = useMemo(() => {
+    const map = new Map<string, number>();
+    if (draftRecaps.length === 0) return map;
+    for (const p of adjustedValued) {
+      const v = lookupHistPrice(p.name, avgPriceMap);
+      if (v !== null) map.set(p.id, v);
+    }
+    return map;
+  }, [adjustedValued, avgPriceMap, draftRecaps.length]);
+
+  const POS_TAB_POSITIONS = ['C', '1B', '2B', '3B', 'SS', 'OF', 'DH', 'SP', 'RP'];
+
+  const positionBreakdown = useMemo(() => {
+    const result = new Map<string, { players: RankedPlayer[]; avg: number; avgHist: number | null }>();
+    for (const pos of POS_TAB_POSITIONS) {
+      const top30 = adjustedValued
+        .filter(p => matchesPositionFilter(p.positions, pos))
+        .slice(0, 30);
+      const avg = top30.length > 0
+        ? Math.round(top30.reduce((s, p) => s + (p.auctionValue ?? 1), 0) / top30.length)
+        : 0;
+      const histPrices = top30.map(p => histPriceById.get(p.id)).filter((v): v is number => v != null);
+      const avgHist = histPrices.length > 0
+        ? Math.round(histPrices.reduce((s, v) => s + v, 0) / histPrices.length)
+        : null;
+      result.set(pos, { players: top30, avg, avgHist });
+    }
+    return result;
+  }, [adjustedValued, histPriceById]);
+
+  const handleLockValue = (playerId: string, value: number) => {
+    setLockedValues(prev => new Map(prev).set(playerId, value));
+  };
+
+  const handleUnlockValue = (playerId: string) => {
+    setLockedValues(prev => {
+      const next = new Map(prev);
+      next.delete(playerId);
+      return next;
+    });
+  };
 
   const handleFlag = (player: RankedPlayer) => {
-    if (flaggedSet.has(player.id)) {
-      unflagPlayer(player.id);
-    } else {
-      flagPlayer(player.id);
-    }
+    if (flaggedSet.has(player.id)) unflagPlayer(player.id);
+    else flagPlayer(player.id);
+  };
+
+  const handleAvoid = (player: RankedPlayer) => {
+    if (avoidedSet.has(player.id)) unavoidPlayer(player.id);
+    else avoidPlayer(player.id);
   };
 
   const columns = useMemo(() => [
@@ -136,12 +178,70 @@ export default function AuctionCalculator() {
     { key: 'auctionValue', label: 'Value ($)', format: (_: unknown, p: RankedPlayer) => {
       if (showRange) {
         const range = rangesMap.get(p.id);
-        if (range) {
-          return <span className="font-mono font-bold text-[var(--gold)]">${range.low}–${range.high}</span>;
-        }
+        if (range) return <span className="font-mono font-bold text-[var(--gold)]">${range.low}–${range.high}</span>;
       }
-      return <span className="font-mono font-bold text-[var(--gold)]">${p.auctionValue ?? 1}</span>;
+      const isLocked = lockedValues.has(p.id);
+      const currentValue = p.auctionValue ?? 1;
+      if (editingId === p.id) {
+        return (
+          <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+            <span className="text-[var(--text-dim)] text-xs">$</span>
+            <input
+              autoFocus
+              type="number" min={1} max={leagueSettings.budget}
+              value={editValue}
+              onChange={(e) => setEditValue(e.target.value)}
+              onBlur={() => {
+                const v = parseInt(editValue);
+                if (!isNaN(v) && v >= 1) handleLockValue(p.id, v);
+                setEditingId(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  const v = parseInt(editValue);
+                  if (!isNaN(v) && v >= 1) handleLockValue(p.id, v);
+                  setEditingId(null);
+                }
+                if (e.key === 'Escape') setEditingId(null);
+              }}
+              className="w-14 bg-[var(--navy-2)] border border-[var(--accent)] rounded px-1.5 py-0.5 text-sm text-[var(--gold)] text-center outline-none"
+            />
+          </div>
+        );
+      }
+      return (
+        <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+          {isLocked && (
+            <button
+              onClick={() => handleUnlockValue(p.id)}
+              title="Unlock value"
+              className="text-[10px] text-[var(--accent)] opacity-70 hover:opacity-100 leading-none"
+            >
+              ⚿
+            </button>
+          )}
+          <span
+            title={isLocked ? 'Locked — click to edit, click ⚿ to unlock' : 'Click to edit'}
+            onClick={() => { setEditingId(p.id); setEditValue(String(currentValue)); }}
+            className={`font-mono font-bold cursor-pointer select-none transition-colors ${
+              isLocked
+                ? 'text-[var(--accent)]'
+                : 'text-[var(--gold)] hover:text-[var(--accent)]'
+            }`}
+          >
+            ${currentValue}
+          </span>
+        </div>
+      );
     }},
+    ...(draftRecaps.length > 0 ? [{
+      key: 'histPrice', label: 'Hist. $', format: (_: unknown, p: RankedPlayer) => {
+        const v = histPriceById.get(p.id);
+        return v != null
+          ? <span className="font-mono text-xs text-[var(--text-dim)]">${v}</span>
+          : <span className="text-[var(--text-dim)]">—</span>;
+      },
+    }] : []),
     { key: 'valueAboveReplacement', label: 'VAR', format: (_: unknown, p: RankedPlayer) =>
       <span className="font-mono text-xs accent-text">{(p.valueAboveReplacement ?? 0).toFixed(3)}</span> },
     { key: 'stats.IP', label: 'IP', sortable: true,
@@ -165,7 +265,8 @@ export default function AuctionCalculator() {
         return ['ERA', 'WHIP', 'OBP'].includes(cat) ? v.toFixed(3) : v.toFixed(0);
       },
     })),
-  ], [selectedCategories, showRange, rangesMap]);
+  ], [selectedCategories, showRange, rangesMap, draftRecaps.length, histPriceById,
+      lockedValues, editingId, editValue, leagueSettings.budget]);
 
   const rowHighlight = useMemo(() => {
     if (!showSuggestions) return undefined;
@@ -183,7 +284,7 @@ export default function AuctionCalculator() {
         <div className="text-5xl mb-4">🚫</div>
         <h2 className="text-xl font-semibold text-[var(--text)] mb-2">Snake Draft Mode</h2>
         <p className="text-[var(--text-dim)] text-sm">Your league uses a snake draft. Auction values are only available for auction leagues.</p>
-        <a href="/baseball/setup" className="mt-4 text-sm accent-text hover:underline">Update league settings →</a>
+        <a href="/baseball/settings" className="mt-4 text-sm accent-text hover:underline">Update league settings in Settings →</a>
       </div>
     );
   }
@@ -198,126 +299,38 @@ export default function AuctionCalculator() {
     );
   }
 
+  const posData = positionBreakdown.get(posTabPos);
+
   return (
     <div className="space-y-5">
-      <div className="flex items-start justify-between gap-4">
+      {/* Header */}
+      <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
           <h1 className="font-display text-5xl tracking-widest text-[var(--text)]">AUCTION VALUES</h1>
-          <div className="flex items-center gap-4 mt-2 flex-wrap">
-            <div className="flex items-center gap-1.5">
-              <span className="text-xs text-[var(--text-dim)]">Teams:</span>
-              {editingTeams ? (
-                <input type="number" min={2} max={30} autoFocus defaultValue={leagueSettings.numTeams}
-                  onBlur={(e) => { updateLeagueSettings({ numTeams: parseInt(e.target.value) || leagueSettings.numTeams }); setEditingTeams(false); }}
-                  onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); if (e.key === 'Escape') setEditingTeams(false); }}
-                  className="w-16 bg-[var(--navy-2)] border border-[var(--accent)] rounded px-2 py-0.5 text-sm text-[var(--text)] outline-none font-mono" />
-              ) : (
-                <button onClick={() => setEditingTeams(true)} className="text-sm font-mono accent-text hover:underline cursor-text">
-                  {leagueSettings.numTeams} <span className="text-[9px] text-[var(--text-dim)]">✎</span>
-                </button>
-              )}
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="text-xs text-[var(--text-dim)]">Budget:</span>
-              {editingBudget ? (
-                <input type="number" min={50} max={10000} autoFocus defaultValue={leagueSettings.budget}
-                  onBlur={(e) => { updateLeagueSettings({ budget: parseInt(e.target.value) || leagueSettings.budget }); setEditingBudget(false); }}
-                  onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); if (e.key === 'Escape') setEditingBudget(false); }}
-                  className="w-20 bg-[var(--navy-2)] border border-[var(--accent)] rounded px-2 py-0.5 text-sm text-[var(--gold)] outline-none font-mono" />
-              ) : (
-                <button onClick={() => setEditingBudget(true)} className="text-sm font-mono text-[var(--gold)] hover:underline cursor-text">
-                  ${leagueSettings.budget} <span className="text-[9px] text-[var(--text-dim)]">✎</span>
-                </button>
-              )}
-            </div>
-            <button onClick={() => setShowRoster(!showRoster)}
-              className="text-xs text-[var(--text-dim)] hover:accent-text border border-[var(--border)] px-2.5 py-1 rounded-lg transition-colors">
-              {showRoster ? '▲' : '▼'} Roster Slots
-            </button>
-            <span className="text-xs text-[var(--text-dim)]">Draft pool: {poolSize} players</span>
+          <div className="flex items-center gap-4 mt-2 flex-wrap text-sm">
+            <span className="text-[var(--text-dim)]">
+              {leagueSettings.numTeams} teams ·{' '}
+              <span className="text-[var(--gold)]">${leagueSettings.budget}</span> budget ·{' '}
+              {poolSize} player pool
+              <a href="/baseball/settings" className="ml-2 text-xs text-[var(--text-dim)] hover:accent-text hover:underline">(edit in Settings)</a>
+            </span>
           </div>
-
-          {/* Inline roster slots */}
-          {showRoster && (
-            <div className="mt-3 p-3 rounded-xl bg-[var(--navy-2)] border border-[var(--border)]">
-              {/* NoPitcherDesignation toggle */}
-              <label className="flex items-center gap-2 cursor-pointer select-none mb-3">
-                <input
-                  type="checkbox"
-                  checked={noPD}
-                  onChange={(e) => {
-                    const checked = e.target.checked;
-                    const sp = (leagueSettings.rosterSlots as Record<string, number>).SP ?? 0;
-                    const rp = (leagueSettings.rosterSlots as Record<string, number>).RP ?? 0;
-                    const p = (leagueSettings.rosterSlots as Record<string, number>).P ?? 0;
-                    if (checked) {
-                      updateLeagueSettings({
-                        noPitcherDesignation: true,
-                        rosterSlots: { ...leagueSettings.rosterSlots, SP: 0, RP: 0, P: sp + rp || p || 4 },
-                      });
-                    } else {
-                      updateLeagueSettings({
-                        noPitcherDesignation: false,
-                        rosterSlots: { ...leagueSettings.rosterSlots, P: 0, SP: Math.floor(p / 2) || 2, RP: Math.ceil(p / 2) || 2 },
-                      });
-                    }
-                  }}
-                  className="w-3.5 h-3.5 accent-[var(--accent)]"
-                />
-                <span className="text-xs text-[var(--text-dim)]">No pitcher designation (SP/RP → P)</span>
-              </label>
-              <div className="grid grid-cols-6 sm:grid-cols-9 gap-2">
-                {ROSTER_KEYS_BASE.map((key) => (
-                  <div key={key} className="text-center">
-                    <div className="text-[10px] font-mono text-[var(--text-dim)] mb-0.5">{key}</div>
-                    <input
-                      type="number" min={0} max={20}
-                      value={(leagueSettings.rosterSlots as Record<string, number>)[key] ?? 0}
-                      onChange={(e) => updateLeagueSettings({
-                        rosterSlots: { ...leagueSettings.rosterSlots, [key]: parseInt(e.target.value) || 0 }
-                      })}
-                      className="w-full bg-[var(--card)] border border-[var(--border)] rounded px-1 py-1 text-sm text-center text-[var(--text)] outline-none focus:border-[var(--accent)]"
-                    />
-                  </div>
-                ))}
-                {noPD ? (
-                  <div className="text-center">
-                    <div className="text-[10px] font-mono text-[var(--accent)] mb-0.5">P</div>
-                    <input
-                      type="number" min={0} max={20}
-                      value={(leagueSettings.rosterSlots as Record<string, number>).P ?? 0}
-                      onChange={(e) => updateLeagueSettings({
-                        rosterSlots: { ...leagueSettings.rosterSlots, P: parseInt(e.target.value) || 0 }
-                      })}
-                      className="w-full bg-[var(--card)] border border-[var(--accent)] border-opacity-50 rounded px-1 py-1 text-sm text-center text-[var(--text)] outline-none focus:border-[var(--accent)]"
-                    />
-                  </div>
-                ) : (
-                  <>
-                    {PITCHER_KEYS.map((key) => (
-                      <div key={key} className="text-center">
-                        <div className="text-[10px] font-mono text-[var(--text-dim)] mb-0.5">{key}</div>
-                        <input
-                          type="number" min={0} max={20}
-                          value={(leagueSettings.rosterSlots as Record<string, number>)[key] ?? 0}
-                          onChange={(e) => updateLeagueSettings({
-                            rosterSlots: { ...leagueSettings.rosterSlots, [key]: parseInt(e.target.value) || 0 }
-                          })}
-                          className="w-full bg-[var(--card)] border border-[var(--border)] rounded px-1 py-1 text-sm text-center text-[var(--text)] outline-none focus:border-[var(--accent)]"
-                        />
-                      </div>
-                    ))}
-                  </>
-                )}
-              </div>
-            </div>
-          )}
         </div>
-        <div className="flex items-center gap-4 shrink-0">
+
+        <div className="flex items-center gap-3 shrink-0 flex-wrap">
           <DataModeToggle mode={dataMode} onChange={setDataMode} pastCount={pastPlayers.length} projCount={projectionPlayers.length} />
+          {lockedValues.size > 0 && (
+            <button
+              onClick={() => setLockedValues(new Map())}
+              className="text-xs border border-[var(--border)] text-[var(--text-dim)] hover:text-[var(--text)] px-3 py-1.5 rounded-lg transition-colors"
+            >
+              Reset {lockedValues.size} lock{lockedValues.size !== 1 ? 's' : ''}
+            </button>
+          )}
           <button
             onClick={() => { if (window.confirm('Clear all player data?')) clearPlayers(); }}
-            className="text-xs border border-red-500/50 text-red-400 px-3 py-1.5 rounded-lg hover:bg-red-900/20 transition-colors">
+            className="text-xs border border-red-500/50 text-red-400 px-3 py-1.5 rounded-lg hover:bg-red-900/20 transition-colors"
+          >
             Reset Data
           </button>
           <div className="text-right">
@@ -328,44 +341,26 @@ export default function AuctionCalculator() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-        {/* Left panel: weights + market scales */}
-        <GlowCard className="space-y-5 self-start">
-          <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <h2 className="text-xs font-mono uppercase tracking-wider text-[var(--text-dim)]">Category Weights</h2>
-              <button onClick={resetWeights} className="text-xs text-[var(--text-dim)] hover:accent-text hover:underline">Reset</button>
-            </div>
-            <div className="space-y-4">
-              {BASEBALL_CATEGORIES.map((cat) => (
-                <CategorySlider key={cat} category={cat} label={BASEBALL_CATEGORY_LABELS[cat as BaseballCategory]}
-                  value={categoryWeights[cat] ?? 1} onChange={(v) => setCategoryWeight(cat, v)} />
-              ))}
-            </div>
-          </div>
+      {/* Tabs */}
+      <div className="flex items-center gap-1 border-b border-[var(--border)] pb-0">
+        {(['all', 'by-position'] as const).map((tab) => (
+          <button
+            key={tab}
+            onClick={() => setActiveTab(tab)}
+            className={`px-4 py-2 text-sm font-medium transition-all border-b-2 -mb-px ${
+              activeTab === tab
+                ? 'accent-text border-[var(--accent)]'
+                : 'text-[var(--text-dim)] border-transparent hover:text-[var(--text)]'
+            }`}
+          >
+            {tab === 'all' ? 'All Players' : 'Value by Position'}
+          </button>
+        ))}
+      </div>
 
-          <div className="pt-3 border-t border-[var(--border)] space-y-4">
-            <h2 className="text-xs font-mono uppercase tracking-wider text-[var(--text-dim)]">Market Scales</h2>
-            <MarketScaleSlider
-              label="Inflation Scale"
-              desc={`Top 100 players overvalued — boosts their suggested bids`}
-              value={inflationScale}
-              onChange={setInflationScale}
-            />
-            <MarketScaleSlider
-              label="Deflation Scale"
-              desc={`Bottom ${Math.min(100, poolSize)} players undervalued — reduces their suggested bids`}
-              value={deflationScale}
-              onChange={setDeflationScale}
-            />
-            <p className="text-[10px] text-[var(--text-dim)]">
-              Adjust to match your league's bidding tendencies. Inflation = elite players go for more; deflation = late-round players are cheap.
-            </p>
-          </div>
-        </GlowCard>
-
-        {/* Table */}
-        <div className="lg:col-span-2 space-y-3">
+      {/* All Players tab */}
+      {activeTab === 'all' && (
+        <div className="space-y-3">
           <div className="flex items-center gap-3 flex-wrap">
             <input type="text" placeholder="Search players..."
               value={search} onChange={(e) => setSearch(e.target.value)}
@@ -376,7 +371,6 @@ export default function AuctionCalculator() {
               {BASEBALL_POSITIONS.map((p) => <option key={p} value={p}>{p}</option>)}
             </select>
             <PlayerTypeToggle value={playerTypeFilter} onChange={setPlayerTypeFilter} />
-            <TeamRankingPanel />
             <button
               onClick={() => setShowSuggestions((v) => !v)}
               className={`text-xs border px-3 py-2 rounded-lg transition-colors ${showSuggestions ? 'accent-bg text-[var(--navy)] border-transparent' : 'border-[var(--border)] text-[var(--text-dim)] hover:text-[var(--text)]'}`}
@@ -390,12 +384,21 @@ export default function AuctionCalculator() {
               Show Range
             </button>
           </div>
+
+          {lockedValues.size > 0 && (
+            <div className="flex items-center gap-2 text-[10px] text-[var(--text-dim)]">
+              <span className="text-[var(--accent)] opacity-70">⚿</span>
+              <span>{lockedValues.size} value{lockedValues.size !== 1 ? 's' : ''} locked — other values redistributed proportionally. Click ⚿ to unlock individually.</span>
+            </div>
+          )}
+
           {showSuggestions && (
             <div className="flex items-center gap-3 text-[10px] text-[var(--text-dim)]">
               <span className="flex items-center gap-1"><span className="inline-block w-3 h-3 rounded bg-yellow-900/40 border border-yellow-700/40" /> Undervalued (high VAR/price)</span>
               <span className="flex items-center gap-1"><span className="inline-block w-3 h-3 rounded bg-red-900/40 border border-red-700/40" /> Overvalued (low VAR/price)</span>
             </div>
           )}
+
           <StatTable
             players={filtered}
             columns={columns}
@@ -404,9 +407,106 @@ export default function AuctionCalculator() {
             rowHighlight={rowHighlight}
             flaggedIds={flaggedSet}
             onFlag={handleFlag}
+            avoidedIds={avoidedSet}
+            onAvoid={handleAvoid}
           />
         </div>
-      </div>
+      )}
+
+      {/* Value by Position tab */}
+      {activeTab === 'by-position' && (
+        <div className="space-y-4">
+          <p className="text-xs text-[var(--text-dim)]">
+            Top 30 players at each position by global auction value. Values are from the full player pool — not position-filtered.
+          </p>
+          {/* Position selector */}
+          <div className="flex flex-wrap gap-2">
+            {POS_TAB_POSITIONS.map((pos) => {
+              const d = positionBreakdown.get(pos);
+              return (
+                <button
+                  key={pos}
+                  onClick={() => setPosTabPos(pos)}
+                  className={`flex flex-col items-center px-3 py-2 rounded-lg border text-xs transition-all ${
+                    posTabPos === pos
+                      ? 'accent-bg text-[var(--navy)] border-transparent'
+                      : 'border-[var(--border)] text-[var(--text-dim)] hover:text-[var(--text)] hover:border-[var(--accent)]/40'
+                  }`}
+                >
+                  <span className="font-mono font-bold">{pos}</span>
+                  {d && d.avg > 0 && (
+                    <span className={`font-mono text-[10px] mt-0.5 ${posTabPos === pos ? 'text-[var(--navy)]/70' : 'text-[var(--gold)]'}`}>
+                      ${d.avg}
+                    </span>
+                  )}
+                  {d && d.avgHist != null && (
+                    <span className={`font-mono text-[10px] ${posTabPos === pos ? 'text-[var(--navy)]/50' : 'text-[var(--text-dim)]'}`}>
+                      hist ${d.avgHist}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Position table */}
+          {posData && posData.players.length > 0 ? (
+            <div>
+              <div className="flex items-center gap-4 mb-3">
+                <span className="font-display text-2xl tracking-wider accent-text">{posTabPos}</span>
+                <div className="text-xs text-[var(--text-dim)]">
+                  {posData.players.length} players ·{' '}
+                  <span className="text-[var(--gold)] font-mono">avg ${posData.avg}</span>{' '}
+                  across top {posData.players.length}
+                </div>
+              </div>
+              <div className="rounded-xl overflow-hidden border border-[var(--border)]">
+                <div className="overflow-auto max-h-[560px]">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th style={{ width: '52px' }}>#</th>
+                        <th>Player</th>
+                        <th>Team</th>
+                        <th>Pos</th>
+                        <th style={{ width: '90px' }}>Value ($)</th>
+                        {draftRecaps.length > 0 && <th style={{ width: '80px' }}>Hist. $</th>}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {posData.players.map((p, i) => (
+                        <tr key={p.id} className={avoidedSet.has(p.id) ? 'opacity-40' : ''}>
+                          <td><span className="text-xs font-mono text-[var(--text-dim)]">#{p.rank}</span></td>
+                          <td>
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-medium text-[var(--text)]">{p.name}</span>
+                              {i === 0 && <span className="text-[10px] font-mono text-[var(--gold)]">top</span>}
+                            </div>
+                          </td>
+                          <td><span className="font-mono text-xs text-[var(--text-dim)]">{p.team}</span></td>
+                          <td><span className="text-xs accent-text font-mono">{p.positions.join(', ')}</span></td>
+                          <td>
+                            <span className="font-mono font-bold text-[var(--gold)]">${p.auctionValue ?? 1}</span>
+                          </td>
+                          {draftRecaps.length > 0 && (
+                            <td>
+                              {histPriceById.get(p.id) != null
+                                ? <span className="font-mono text-xs text-[var(--text-dim)]">${histPriceById.get(p.id)}</span>
+                                : <span className="text-[var(--text-dim)]">—</span>}
+                            </td>
+                          )}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="text-center py-12 text-[var(--text-dim)] text-sm">No players found for {posTabPos}.</div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

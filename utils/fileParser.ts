@@ -142,7 +142,7 @@ export async function parseFile(file: File): Promise<{ headers: string[]; rows: 
 }
 
 // ── Normalize name for ID/matching ───────────────────────────────────────────
-function normalizeName(name: string): string {
+export function normalizeName(name: string): string {
   return name
     .toLowerCase()
     .normalize('NFD')

@@ -8,7 +8,7 @@ export default function HomePage() {
   const router = useRouter();
 
   useEffect(() => {
-    router.replace(`/${activeSport}/analysis`);
+    router.replace(activeSport === 'baseball' ? '/baseball/deep-analysis' : '/basketball/analysis');
   }, [activeSport, router]);
 
   return (

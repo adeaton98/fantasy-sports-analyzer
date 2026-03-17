@@ -9,19 +9,19 @@ export default function Nav() {
 
   const baseLinks = [
     { href: '/upload', label: 'Upload Data', icon: '↑' },
-    { href: `/${activeSport}/analysis`, label: 'Analysis', icon: '◈' },
   ];
 
   const sportLinks = activeSport === 'baseball'
     ? [
-        { href: '/baseball/deep-analysis', label: 'Deep Analysis', icon: '🔬' },
+        { href: '/baseball/deep-analysis', label: 'Analysis', icon: '◈' },
         { href: '/baseball/auction', label: 'Auction Values', icon: '$' },
         { href: '/baseball/draft', label: 'Draft Mode', icon: '◎' },
-        { href: '/baseball/watchlist', label: 'Watchlist', icon: '★' },
-        { href: '/baseball/team-bank', label: 'Team Bank', icon: '💾' },
         { href: '/baseball/league', label: 'My League', icon: '🏆' },
+        { href: '/baseball/league-history', label: 'History', icon: '⌛' },
+        { href: '/baseball/settings', label: 'Settings', icon: '⚙' },
       ]
     : [
+        { href: '/basketball/analysis', label: 'Analysis', icon: '◈' },
         { href: '/basketball/draft', label: 'Draft Mode', icon: '◎' },
       ];
 

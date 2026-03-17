@@ -2,9 +2,10 @@
 import { useState } from 'react';
 import MyDraft from './MyDraft';
 import TrackDraft from './TrackDraft';
+import TeamBank from './TeamBank';
 
 export default function BaseballDraftMode() {
-  const [tab, setTab] = useState<'my' | 'track'>('my');
+  const [tab, setTab] = useState<'my' | 'track' | 'bank'>('my');
 
   return (
     <div className="space-y-5">
@@ -20,10 +21,11 @@ export default function BaseballDraftMode() {
         {[
           { key: 'my', label: 'My Draft', icon: '⚡' },
           { key: 'track', label: 'Track Draft', icon: '📋' },
+          { key: 'bank', label: 'Team Bank', icon: '💾' },
         ].map(({ key, label, icon }) => (
           <button
             key={key}
-            onClick={() => setTab(key as 'my' | 'track')}
+            onClick={() => setTab(key as 'my' | 'track' | 'bank')}
             className={`flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium transition-all duration-200 ${
               tab === key
                 ? 'accent-bg text-[var(--navy)] font-semibold'
@@ -37,7 +39,9 @@ export default function BaseballDraftMode() {
 
       {/* Content */}
       <div className="animate-fade-up">
-        {tab === 'my' ? <MyDraft /> : <TrackDraft />}
+        {tab === 'my' && <MyDraft onSaveToBank={() => setTab('bank')} />}
+        {tab === 'track' && <TrackDraft />}
+        {tab === 'bank' && <TeamBank embeddedMode onGoToDraft={() => setTab('my')} />}
       </div>
     </div>
   );
